@@ -1,12 +1,13 @@
 package tui
 
 import (
+	"image/color"
 	"strings"
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/charliek/craze/internal/agent"
@@ -195,7 +196,7 @@ func TestModeChipColourPerKind(t *testing.T) {
 	m := statusFixture(t)
 	for _, tc := range []struct {
 		mode  string
-		want  lipgloss.CompleteColor
+		want  color.Color
 		which string
 	}{
 		{"agent", m.theme.ModeImplement, "implement"},
@@ -213,7 +214,7 @@ func TestModeChipColourPerKind(t *testing.T) {
 			t.Fatalf("%s (%s) chip is %v, want %v", tc.mode, tc.which, got, tc.want)
 		}
 		row, _ := m.statusRow2(m.lay)
-		if !strings.Contains(row, ansiFG(tc.want.TrueColor)+text) {
+		if !strings.Contains(row, ansiFG(depthHex(tc.want))+text) {
 			t.Fatalf("%s chip is not drawn in %s:\n%q", tc.mode, tc.want, row)
 		}
 		if !strings.Contains(plainView(m), text) {

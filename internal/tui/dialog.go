@@ -4,11 +4,9 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/charmbracelet/bubbles/cursor"
-	"github.com/charmbracelet/bubbles/textinput"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/textinput"
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
-	"github.com/rivo/uniseg"
 )
 
 const (
@@ -193,7 +191,7 @@ func (m Model) dialogRowDim(text, tag string, selected, focused, dim bool, inner
 	}
 	st := styleFG(fg)
 	if cursor {
-		st = selectionBand(lipgloss.ColorProfile(), st, m.theme.SelectionBG)
+		st = selectionBand(m.theme.profile, st, m.theme.SelectionBG)
 	}
 	return st.Render(body)
 }
@@ -312,7 +310,7 @@ func wrapPathPara(para string, inner int) []string {
 			if !ok {
 				// No "/" fits: cut at the width (at least one grapheme, so a
 				// rune wider than the row still moves on).
-				if piece = ansi.Truncate(path, inner, ""); piece == "" {
+				if piece = truncateCells(path, inner, ""); piece == "" {
 					piece = firstGrapheme(path)
 				}
 			}
@@ -352,7 +350,7 @@ func nextLongPath(s string, inner int) (start, end int, ok bool) {
 // cells — false when none does. A "/" the path opens with is no place to cut:
 // a row holding it alone has read nothing off.
 func pathCut(path string, room int) (string, bool) {
-	fit := ansi.Truncate(path, room, "")
+	fit := truncateCells(path, room, "")
 	if k := strings.LastIndexByte(fit, '/'); k > 0 {
 		return fit[:k+1], true
 	}
@@ -361,7 +359,7 @@ func pathCut(path string, room int) (string, bool) {
 
 // firstGrapheme is s's first grapheme cluster.
 func firstGrapheme(s string) string {
-	g, _, _, _ := uniseg.FirstGraphemeClusterInString(s, -1)
+	g, _ := ansi.FirstGraphemeCluster(s, ansi.GraphemeWidth)
 	return g
 }
 
@@ -385,7 +383,7 @@ func ellipsize(s string, inner int) string {
 	if ansi.StringWidth(s)+1 <= inner {
 		return s + "…"
 	}
-	return ansi.Truncate(s, max(0, inner-1), "") + "…"
+	return truncateCells(s, max(0, inner-1), "") + "…"
 }
 
 // dialogInput is a dialog's one-line field — the model dialog's filter,
@@ -396,9 +394,14 @@ func ellipsize(s string, inner int) string {
 func (m Model) dialogInput() textinput.Model {
 	ti := textinput.New()
 	ti.Prompt = modelFilterPrompt
-	ti.PromptStyle = styleFG(m.theme.Accent)
-	ti.TextStyle = styleFG(m.theme.FG)
-	ti.Cursor.SetMode(cursor.CursorStatic)
+	styles := ti.Styles()
+	styles.Focused.Prompt = styleFG(m.theme.Accent)
+	styles.Focused.Text = styleFG(m.theme.FG)
+	styles.Blurred.Prompt = styles.Focused.Prompt
+	styles.Blurred.Text = styles.Focused.Text
+	styles.Cursor.Blink = false
+	styles.Cursor.Color = m.theme.FG
+	ti.SetStyles(styles)
 	ti.Focus()
 	return ti
 }
@@ -430,10 +433,10 @@ func dialogFieldWidth(inner int) int {
 // nothing, which leaves bubbles' own scrolling alone between two layouts.
 func fitDialogField(f *textinput.Model, inner int) {
 	w := dialogFieldWidth(inner)
-	if f.Width == w {
+	if f.Width() == w {
 		return
 	}
-	f.Width = w
+	f.SetWidth(w)
 	pos := f.Position()
 	// SetCursor re-derives the window only once the cursor leaves it: the
 	// end moves its right edge to the end, the start its left edge to the
@@ -516,7 +519,7 @@ func overlay(base, box string, r rect) string {
 
 // spliceRow replaces [x, x+w) of one base line with box.
 //
-// The suffix is cut with ansi.TruncateLeft, which replays every escape
+// The suffix is cut with dropCells, which replays every escape
 // sequence it skipped: the base line's SGR state is re-established after the
 // box rather than the box's own style running on to the end of the row. A wide
 // grapheme straddling either edge becomes a blank cell, because half a
@@ -529,25 +532,25 @@ func spliceRow(line, box string, x, w int) string {
 	// The box is forced to exactly the cells it was given, so a box that ran
 	// off the right edge (or came up short) cannot change the row's width.
 	w = min(w, full-x)
-	box = ansi.Truncate(box, w, "")
+	box = truncateCells(box, w, "")
 	if pad := w - ansi.StringWidth(box); pad > 0 {
 		box += strings.Repeat(" ", pad)
 	}
-	left := ansi.Truncate(line, x, "")
+	left := truncateCells(line, x, "")
 	if pad := x - ansi.StringWidth(left); pad > 0 {
 		// A wide grapheme straddles the left edge. The blanks that replace it
-		// are handed to Truncate as its tail, which writes them at the cut and
+		// are handed to truncateCells as its tail, which writes them at the cut and
 		// therefore inside the SGR state the base line had there, so the cells
 		// keep the base's background instead of falling back to the default.
-		left = ansi.Truncate(line, x, strings.Repeat(" ", pad))
+		left = truncateCells(line, x, strings.Repeat(" ", pad))
 	}
 	right := ""
 	if end := x + w; end < full {
-		right = ansi.TruncateLeft(line, end, "")
+		right = dropCells(line, end, "")
 		if ansi.StringWidth(right) > full-end {
 			// Same at the right edge, and the prefix is the same trick:
-			// TruncateLeft writes it after the escape sequences it replays.
-			right = ansi.TruncateLeft(line, end+1, " ")
+			// dropCells writes it after the escape sequences it replays.
+			right = dropCells(line, end+1, " ")
 		}
 		if pad := full - end - ansi.StringWidth(right); pad > 0 {
 			// The straddler was the last thing on the line, so the cut took

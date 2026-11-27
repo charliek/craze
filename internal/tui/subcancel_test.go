@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/charliek/craze/internal/agent"
 )
@@ -90,11 +90,11 @@ func TestStopKeyFallsThroughWithoutCapability(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			m, rec := stopModel(t, tc.p, tc.kid)
 			m.input.SetValue("hey")
-			m = pressKey(t, m, tea.KeyDown)
+			m = pressKey(t, m, "down")
 			if !m.agentFocus || m.agentID != "kid-1" {
 				t.Fatalf("control: down focused the rows %v on %q", m.agentFocus, m.agentID)
 			}
-			m = pressKey(t, m, tea.KeyBackspace)
+			m = pressKey(t, m, "backspace")
 			if m.agentFocus || !m.input.Focused() || m.input.Value() != "he" {
 				t.Fatalf("backspace on the row: rows focused %v, composer focused %v, draft %q; want the composer's key",
 					m.agentFocus, m.input.Focused(), m.input.Value())
@@ -107,11 +107,11 @@ func TestStopKeyFallsThroughWithoutCapability(t *testing.T) {
 	t.Run("grok, a running child's view", func(t *testing.T) {
 		m, rec := stopModel(t, agent.GrokProvider(), stopKid("kid-1", "job one", agent.SubagentRunning))
 		m.input.SetValue("hey")
-		m = pressKey(t, pressKey(t, m, tea.KeyDown), tea.KeyEnter)
+		m = pressKey(t, pressKey(t, m, "down"), "enter")
 		if m.viewing != "kid-1" {
 			t.Fatalf("control: viewing %q, want kid-1", m.viewing)
 		}
-		for _, k := range []tea.KeyType{tea.KeyBackspace, tea.KeyDelete} {
+		for _, k := range []string{"backspace", "delete"} {
 			m = pressKey(t, m, k)
 		}
 		if m.viewing != "kid-1" || m.input.Value() != "hey" {
@@ -137,19 +137,19 @@ func TestStopKeyStopsTheRunningChild(t *testing.T) {
 	m, rec := stopModel(t, agent.NativeProvider(),
 		stopKid("kid-1", "job one", agent.SubagentRunning), stopKid("kid-2", "job two", agent.SubagentRunning))
 	m.input.SetValue("hey")
-	m = pressKey(t, m, tea.KeyDown)
+	m = pressKey(t, m, "down")
 	want := []string{}
 	for _, step := range []struct {
-		key  tea.KeyType
-		move tea.KeyType // pressed first; 0 for none
+		key  string
+		move string // pressed first, when set
 		id   string
 	}{
-		{tea.KeyBackspace, 0, "kid-1"},
-		{tea.KeyDelete, 0, "kid-1"},
-		{tea.KeyDelete, tea.KeyDown, "kid-2"},
-		{tea.KeyBackspace, 0, "kid-2"},
+		{"backspace", "", "kid-1"},
+		{"delete", "", "kid-1"},
+		{"delete", "down", "kid-2"},
+		{"backspace", "", "kid-2"},
 	} {
-		if step.move != 0 {
+		if step.move != "" {
 			m = pressKey(t, m, step.move)
 		}
 		var cmd tea.Cmd
@@ -173,11 +173,11 @@ func TestStopKeyStopsTheRunningChild(t *testing.T) {
 			t.Fatalf("the fire-and-forget stop opened a gate")
 		}
 	}
-	m = pressKey(t, m, tea.KeyEnter)
+	m = pressKey(t, m, "enter")
 	if m.viewing != "kid-2" {
 		t.Fatalf("control: viewing %q, want kid-2", m.viewing)
 	}
-	for _, k := range []tea.KeyType{tea.KeyBackspace, tea.KeyDelete} {
+	for _, k := range []string{"backspace", "delete"} {
 		var cmd tea.Cmd
 		m, cmd = pressKeyCmd(t, m, k)
 		if cmd == nil {
@@ -198,7 +198,7 @@ func TestStopKeyStopsTheRunningChild(t *testing.T) {
 
 	m.eng = nil
 	var cmd tea.Cmd
-	m, cmd = pressKeyCmd(t, m, tea.KeyDelete)
+	m, cmd = pressKeyCmd(t, m, "delete")
 	if cmd != nil {
 		t.Fatalf("with no engine: got a Cmd; want none, since there is nothing to call")
 	}
@@ -210,9 +210,9 @@ func TestStopKeyStopsTheRunningChild(t *testing.T) {
 // pressKeyCmd is pressKey with the Cmd kept: the fire-and-forget stop's call
 // lives in the Cmd, not the Update, so a caller that cares which one ran needs
 // it (unlike pressKey's other callers, which never do).
-func pressKeyCmd(t *testing.T, m Model, k tea.KeyType) (Model, tea.Cmd) {
+func pressKeyCmd(t *testing.T, m Model, k string) (Model, tea.Cmd) {
 	t.Helper()
-	tm, cmd := m.Update(tea.KeyMsg{Type: k})
+	tm, cmd := m.Update(testKey(k))
 	return tm.(Model), cmd
 }
 
@@ -225,9 +225,9 @@ func TestStopKeyIgnoresUnknownSubagent(t *testing.T) {
 	m, rec := stopModel(t, agent.NativeProvider(), stopKid("kid-1", "job one", agent.SubagentRunning))
 	rec.stopErr = agent.ErrNoSuchSubagent
 	m.input.SetValue("hey")
-	m = pressKey(t, m, tea.KeyDown)
-	before := m.View()
-	m, cmd := pressKeyCmd(t, m, tea.KeyBackspace)
+	m = pressKey(t, m, "down")
+	before := m.View().Content
+	m, cmd := pressKeyCmd(t, m, "backspace")
 	if cmd == nil {
 		t.Fatal("backspace returned no Cmd; want the fire-and-forget stop")
 	}
@@ -237,7 +237,7 @@ func TestStopKeyIgnoresUnknownSubagent(t *testing.T) {
 	if got := rec.stopped(); !slices.Equal(got, []string{"kid-1"}) {
 		t.Fatalf("the session was asked to stop %q; want [kid-1]", got)
 	}
-	if got := m.View(); got != before {
+	if got := m.View().Content; got != before {
 		t.Fatalf("the refused stop changed the screen:\nbefore:\n%s\nafter:\n%s", before, got)
 	}
 	if m.gate != nil {
@@ -252,7 +252,7 @@ func TestStopKeyIgnoresUnknownSubagent(t *testing.T) {
 func TestStopHintAndHelpNeedTheCapability(t *testing.T) {
 	banner := func(p agent.Provider, status agent.SubagentStatus) string {
 		m, _ := stopModel(t, p, stopKid("kid-1", "job one", status))
-		m = pressKey(t, pressKey(t, m, tea.KeyDown), tea.KeyEnter)
+		m = pressKey(t, pressKey(t, m, "down"), "enter")
 		if m.viewing != "kid-1" {
 			t.Fatalf("control: viewing %q, want kid-1", m.viewing)
 		}

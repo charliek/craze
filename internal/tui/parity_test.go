@@ -15,8 +15,8 @@ import (
 	"time"
 	"weak"
 
+	tea "charm.land/bubbletea/v2"
 	"charm.land/fantasy"
-	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/transcript"
@@ -1126,7 +1126,7 @@ func TestTheStateMirrorsMatchTheModelWhenQuiet(t *testing.T) {
 		m = pumpSettled(t, m)
 		check(t, m, "after /model")
 
-		m = pumpKey(t, m, tea.KeyMsg{Type: tea.KeyShiftTab})
+		m = pumpKey(t, m, tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
 		m = pumpSettled(t, m)
 		check(t, m, "after a mode change")
 
@@ -1215,7 +1215,7 @@ func TestTheStateMirrorsMatchTheModelWhenQuiet(t *testing.T) {
 		m = startScripted(t, m, sess, "go", first)
 		awaitBarrier(t, first.opened, "the first turn opening")
 		m.input.SetValue("SOONER")
-		m = pumpKey(t, m, tea.KeyMsg{Type: tea.KeyCtrlL})
+		m = pumpKey(t, m, tea.KeyPressMsg{Code: 'l', Mod: tea.ModCtrl})
 		release := sess.HoldNextCancelPastItsDeadline()
 		t.Cleanup(release)
 		m = pumpKey(t, m, enter())
@@ -1245,7 +1245,7 @@ func TestTheStateMirrorsMatchTheModelWhenQuiet(t *testing.T) {
 		awaitBarrier(t, second.opened, "the second turn opening")
 		sess.Script(sent)
 		m.input.SetValue("NOW")
-		m = pumpKey(t, m, tea.KeyMsg{Type: tea.KeyCtrlL})
+		m = pumpKey(t, m, tea.KeyPressMsg{Code: 'l', Mod: tea.ModCtrl})
 		m = pumpKey(t, m, enter())
 		awaitBarrier(t, sent.opened, "the armed send's turn opening")
 		m = pumpUntil(t, m, turnsDrawn(3))
@@ -1285,7 +1285,7 @@ func TestTheStateMirrorsMatchTheModelWhenQuiet(t *testing.T) {
 		}
 		// A mode change is a delta, which re-reads the snapshot — and with it
 		// the title native took from the first prompt.
-		m = pumpKey(t, m, tea.KeyMsg{Type: tea.KeyShiftTab})
+		m = pumpKey(t, m, tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
 		m = pumpSettled(t, m)
 		// SF-01, C8: the first prompt's title is a delta now, so the fold has
 		// it too — no exemption, the same check as every other case.

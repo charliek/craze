@@ -1,11 +1,5 @@
 package tui
 
-import (
-	"io"
-
-	"github.com/charmbracelet/x/ansi"
-)
-
 // The four marks §3.10 pins, highest priority first in windowTitle: a card
 // waiting on the user outranks an error, which outranks a turn in progress,
 // which outranks idle (the default, including the pre-start picker).
@@ -26,9 +20,7 @@ const titleTextCap = 40
 // says the same thing for every session until it earns a name.
 const titleUntitled = "craze"
 
-// windowTitle is the terminal tab title for the model's current state. It is
-// pure — no side effect, no channel read — so the Update wrapper can call it
-// on every transition and compare the result to what it last emitted (§3.10).
+// windowTitle is the terminal tab title for the model's current state. Bubble Tea emits it when it changes.
 //
 // The strong-send confirm line is deliberately not read here: it is the
 // user's own keystroke landing on its own dialog, not the agent asking for
@@ -48,21 +40,7 @@ func (m Model) windowTitle() string {
 	if text == "" {
 		text = titleUntitled
 	}
-	text = ansi.Truncate(text, titleTextCap, "…")
+	text = truncateCells(text, titleTextCap, "…")
 
 	return mark + " " + text
-}
-
-// clearWindowTitle is Run's exit-path clear (§3.10): writing OSC 2 with an
-// empty title through the same writer bubbletea rendered into hands the tab
-// back to Ghostty's or roost's own derived name instead of leaving a stale
-// "✦ craze" once craze itself is gone. It is a no-op when lastTitle is still
-// "" — nothing was ever set, whether because the run never got past its first
-// frame or because Config.TerminalTitle was off — so a session that never
-// touched the tab title does not need the terminal to fall back to anything.
-func clearWindowTitle(w io.Writer, m Model) {
-	if m.lastTitle == "" {
-		return
-	}
-	_, _ = w.Write([]byte(ansi.SetWindowTitle("")))
 }

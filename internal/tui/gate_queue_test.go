@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/backend"
@@ -360,7 +360,7 @@ func armedOverPastItsDeadline(r *schedRun) func() {
 func armedHeld(r *schedRun, release func()) func() {
 	r.t.Helper()
 	r.typeText("NOW")
-	r.key(tea.KeyMsg{Type: tea.KeyCtrlL})
+	r.key(tea.KeyPressMsg{Code: 'l', Mod: tea.ModCtrl})
 	r.key(enter())
 	r.feed()
 	if !r.m().sendNowPending() || r.m().armedDraft == "" {
@@ -404,11 +404,11 @@ func runesThen(s string, k ...tea.Msg) func(*schedRun) []tea.Msg {
 // emptied edit; Backspace on a row; a click on a row's [cancel]; and Ctrl+L's
 // save-then-send, two links.
 func chainSites() []chainSite {
-	ctrlC := tea.KeyMsg{Type: tea.KeyCtrlC}
-	ctrlL := tea.KeyMsg{Type: tea.KeyCtrlL}
-	esc := tea.KeyMsg{Type: tea.KeyEsc}
-	up := tea.KeyMsg{Type: tea.KeyUp}
-	bs := tea.KeyMsg{Type: tea.KeyBackspace}
+	ctrlC := tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl}
+	ctrlL := tea.KeyPressMsg{Code: 'l', Mod: tea.ModCtrl}
+	esc := tea.KeyPressMsg{Code: tea.KeyEsc}
+	up := tea.KeyPressMsg{Code: tea.KeyUp}
+	bs := tea.KeyPressMsg{Code: tea.KeyBackspace}
 	return []chainSite{
 		{
 			// The withdrawal's note is the model's own, and its delta the echo
@@ -504,7 +504,7 @@ func chainSites() []chainSite {
 				if band.Empty() || queueActionAt(x, r.m().width) != actionCancel {
 					r.t.Fatalf("prepare: no [cancel] under the pointer (band %+v, x %d)", band, x)
 				}
-				return []tea.Msg{up, tea.MouseMsg{X: x, Y: band.Top, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress}}
+				return []tea.Msg{up, tea.MouseClickMsg{X: x, Y: band.Top, Button: tea.MouseLeft}}
 			},
 			links: 1,
 			held:  runeKey('k'),
@@ -620,7 +620,7 @@ func chainFrameSequencesOf(t *testing.T, sites []chainSite) {
 // the moment of the key, though the clock has moved since. The frames a wait
 // can see after the token, and the final state, are the baseline's.
 func TestTheCtrlCChainRunsWhole(t *testing.T) {
-	ctrlC := tea.KeyMsg{Type: tea.KeyCtrlC}
+	ctrlC := tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl}
 	for _, tc := range []struct {
 		name  string
 		armed bool
@@ -645,7 +645,7 @@ func TestTheCtrlCChainRunsWhole(t *testing.T) {
 						release = armedOver(r)
 						t.Cleanup(release)
 					} else {
-						r.key(tea.KeyMsg{Type: tea.KeyUp})
+						r.key(tea.KeyPressMsg{Code: tea.KeyUp})
 						r.key(enter())
 						if r.m().queueEdit == "" || r.m().input.Value() != "NEXT" {
 							t.Fatalf("prepare: not editing NEXT (edit %q, composer %q)", r.m().queueEdit, r.m().input.Value())
@@ -919,10 +919,10 @@ func (r *schedRun) answerStalled(b *stallBackend) {
 // — and the chain goes on where the user asked for everything to stop. Both
 // cases each time: the command never ran, and it ran with its answer lost.
 func TestAQueueVerbThatNeverAnswersSaysSo(t *testing.T) {
-	ctrlC := tea.KeyMsg{Type: tea.KeyCtrlC}
-	ctrlL := tea.KeyMsg{Type: tea.KeyCtrlL}
-	up := tea.KeyMsg{Type: tea.KeyUp}
-	bs := tea.KeyMsg{Type: tea.KeyBackspace}
+	ctrlC := tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl}
+	ctrlL := tea.KeyPressMsg{Code: 'l', Mod: tea.ModCtrl}
+	up := tea.KeyPressMsg{Code: tea.KeyUp}
+	bs := tea.KeyPressMsg{Code: tea.KeyBackspace}
 
 	// bandIsTheSessions: at the release the band is the fold's — what this
 	// client has folded, never a read of the engine's live queue (plan 027
@@ -952,7 +952,7 @@ func TestAQueueVerbThatNeverAnswersSaysSo(t *testing.T) {
 				t.Cleanup(armedOver(r))
 				before := r.m()
 				sb := r.stall("Disarm", ran)
-				r.step(tea.KeyMsg{Type: tea.KeyEsc})
+				r.step(tea.KeyPressMsg{Code: tea.KeyEsc})
 				r.answerStalled(sb)
 				m := r.m()
 				noted(t, r, noAnswerDisarmNote)
@@ -1041,7 +1041,7 @@ func TestAQueueVerbThatNeverAnswersSaysSo(t *testing.T) {
 						r.step(bs)
 					} else {
 						band := r.m().lay.Region(regionQueue)
-						r.step(tea.MouseMsg{X: r.m().width - 2, Y: band.Top + 1, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+						r.step(tea.MouseClickMsg{X: r.m().width - 2, Y: band.Top + 1, Button: tea.MouseLeft})
 					}
 					if len(r.calls) != 1 {
 						t.Fatalf("%s issued %d gated calls", how, len(r.calls))
@@ -1156,7 +1156,7 @@ func (b *halfBackend) ClearQueue(ctx context.Context, c engine.Command) ([]agent
 // marker while the ClearQueue's clear still shows; a ClearQueue that did not
 // answer says the queue may not have been cleared, over the session's band.
 func TestClearPendingSaysWhichHalfDidNotAnswer(t *testing.T) {
-	ctrlC := tea.KeyMsg{Type: tea.KeyCtrlC}
+	ctrlC := tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl}
 	t.Run("the Disarm", func(t *testing.T) {
 		r := newSchedRun(t, false)
 		queuedBehind(r, "ROW")
@@ -1258,7 +1258,7 @@ func TestClearPendingsCallJudgesEachVerbByItsDeadline(t *testing.T) {
 // r46 3). The baseline is the same property over today's control flow, not a
 // second run of the window.
 func TestACtrlCOverASettlingTurnRunsNoQueuedRow(t *testing.T) {
-	ctrlC := tea.KeyMsg{Type: tea.KeyCtrlC}
+	ctrlC := tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl}
 	for _, mode := range frameGateModes {
 		t.Run(mode.name, func(t *testing.T) {
 			r := newSchedRun(t, mode.sync)

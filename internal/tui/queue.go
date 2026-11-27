@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/backend"
@@ -870,7 +870,7 @@ func (m Model) sendQueuedNow(p agent.QueuedPrompt) (tea.Model, tea.Cmd) {
 // row key hands the keyboard back to the composer and is then handled as
 // usual, so typing never needs a second press. A handled key's command is the
 // band's own (Backspace's gated Unqueue), which the caller returns.
-func (m Model) handleQueueKey(msg tea.KeyMsg) (bool, Model, tea.Cmd) {
+func (m Model) handleQueueKey(msg keyInput) (bool, Model, tea.Cmd) {
 	items := m.visibleQueue()
 	if len(items) == 0 {
 		m.focusComposer()
@@ -878,8 +878,8 @@ func (m Model) handleQueueKey(msg tea.KeyMsg) (bool, Model, tea.Cmd) {
 		return false, m, nil
 	}
 	sel, _ := m.queueSelected()
-	switch msg.Type {
-	case tea.KeyUp:
+	switch shortcut(msg) {
+	case "up":
 		if m.queueSel <= 0 {
 			m.focusComposer()
 			m.queueFocus = false
@@ -887,7 +887,7 @@ func (m Model) handleQueueKey(msg tea.KeyMsg) (bool, Model, tea.Cmd) {
 			m.moveQueue(-1)
 		}
 		return true, m, nil
-	case tea.KeyDown:
+	case "down":
 		if m.queueSel < len(items)-1 {
 			m.moveQueue(1)
 			return true, m, nil
@@ -902,10 +902,10 @@ func (m Model) handleQueueKey(msg tea.KeyMsg) (bool, Model, tea.Cmd) {
 			m.queueFocus = false
 		}
 		return true, m, nil
-	case tea.KeyEnter:
+	case "enter":
 		m.startQueueEdit(sel)
 		return true, m, nil
-	case tea.KeyBackspace, tea.KeyDelete:
+	case "backspace", "delete":
 		// Where the keyboard goes depends on the band the Unqueue leaves, so
 		// it is decided in the continuation.
 		next, cmd := m.dropQueuedRow(sel.ID, func(m Model) (Model, tea.Cmd) {
@@ -916,7 +916,7 @@ func (m Model) handleQueueKey(msg tea.KeyMsg) (bool, Model, tea.Cmd) {
 			return m, nil
 		})
 		return true, next, cmd
-	case tea.KeyEsc:
+	case "esc":
 		m.focusComposer()
 		m.queueFocus = false
 		return true, m, nil
@@ -994,31 +994,4 @@ func (m Model) queueClick(x, row int) (tea.Model, tea.Cmd) {
 		return m.dropQueuedRow(p.ID, linkDone)
 	}
 	return m, nil
-}
-
-// ------------------------------------------------------------- mouse modes
-
-// queueMouseCmd is the terminal's motion mode following the queue. Hover needs
-// motion reports with no button down (1003), which cell motion (1002) does not
-// send; neither escape disables the other, so every transition goes through
-// tea.DisableMouse. Nothing is issued under --no-mouse: craze asked the
-// terminal for no reporting at all and must not start now.
-//
-// "Rows" means queued messages, not drawn rows: a band degradation took away
-// keeps all-motion, and the hover simply has nothing to hit. The side view
-// wants none (plan 040 §3.6): the strip is inert under it, and every pointer
-// move would be an Update and a frame for a hover it never shows.
-func (m *Model) queueMouseCmd() tea.Cmd {
-	if !m.mouseEnabled {
-		return nil
-	}
-	want := m.btw == nil && len(m.queueItems()) > 0
-	if want == m.mouseAll {
-		return nil
-	}
-	m.mouseAll = want
-	if want {
-		return tea.Sequence(tea.DisableMouse, tea.EnableMouseAllMotion)
-	}
-	return tea.Sequence(tea.DisableMouse, tea.EnableMouseCellMotion)
 }

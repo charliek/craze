@@ -4,15 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"reflect"
-	"runtime"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/charliek/craze/internal/agent"
@@ -31,7 +29,7 @@ func isolateSkillsHome(t *testing.T) {
 // plainView is the frame as text. TestMain forces a true-colour profile so the
 // theme tests can assert on real escape sequences, which means every other
 // assertion has to strip them first.
-func plainView(m Model) string { return plain(m.View()) }
+func plainView(m Model) string { return plain(m.View().Content) }
 
 func plain(s string) string { return ansi.Strip(s) }
 
@@ -109,7 +107,7 @@ func startedLikeInit(t *testing.T, m Model) Model {
 	return tm.(Model)
 }
 
-func enter() tea.KeyMsg { return tea.KeyMsg{Type: tea.KeyEnter} }
+func enter() tea.KeyPressMsg { return tea.KeyPressMsg{Code: tea.KeyEnter} }
 
 // runCmd runs the command a handler returned. Update batches the tick chain in
 // behind it, so a batch is unwrapped and only its first member runs: executing
@@ -215,7 +213,7 @@ func TestEnterSendsAndFollowUp(t *testing.T) {
 
 func TestCtrlDQuits(t *testing.T) {
 	m := sized(t)
-	tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlD})
+	tm, cmd := m.Update(tea.KeyPressMsg{Code: 'd', Mod: tea.ModCtrl})
 	m = tm.(Model)
 	if !m.quitting {
 		t.Fatal("expected quit")
@@ -227,7 +225,7 @@ func TestCtrlDQuits(t *testing.T) {
 
 	m = sized(t)
 	m.input.SetValue("keep")
-	tm, cmd = m.Update(tea.KeyMsg{Type: tea.KeyCtrlD})
+	tm, cmd = m.Update(tea.KeyPressMsg{Code: 'd', Mod: tea.ModCtrl})
 	m = tm.(Model)
 	if !m.quitting || cmd == nil {
 		t.Fatal("ctrl+d should quit with composer text too")
@@ -237,7 +235,7 @@ func TestCtrlDQuits(t *testing.T) {
 func TestTypingQuickDoesNotQuit(t *testing.T) {
 	m := sized(t)
 	for _, r := range "quick question" {
-		tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		tm, _ := m.Update(runeKey(r))
 		m = tm.(Model)
 		if m.quitting {
 			t.Fatalf("typing %q quit craze", r)
@@ -264,7 +262,7 @@ func TestCtrlCStateMachine(t *testing.T) {
 
 	t.Run("idle quits", func(t *testing.T) {
 		m := sized(t)
-		tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+		tm, cmd := m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
 		m = tm.(Model)
 		if !m.quitting || cmd == nil {
 			t.Fatal("ctrl+c while idle should quit")
@@ -275,7 +273,7 @@ func TestCtrlCStateMachine(t *testing.T) {
 	t.Run("error quits", func(t *testing.T) {
 		m := sized(t)
 		m.status = statusError
-		tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+		tm, cmd := m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
 		m = tm.(Model)
 		if !m.quitting || cmd == nil {
 			t.Fatal("ctrl+c in the error state should quit")
@@ -286,7 +284,7 @@ func TestCtrlCStateMachine(t *testing.T) {
 		now := base
 		m := hangWorking(t)
 		m.clock = func() time.Time { return now }
-		tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+		tm, cmd := m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
 		m = tm.(Model)
 		if m.quitting {
 			t.Fatal("first ctrl+c while working must cancel, not quit")
@@ -298,7 +296,7 @@ func TestCtrlCStateMachine(t *testing.T) {
 			t.Fatalf("deadline %v", m.ctrlCDeadline)
 		}
 		now = base.Add(400 * time.Millisecond)
-		tm, cmd = m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+		tm, cmd = m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
 		m = tm.(Model)
 		if !m.quitting || cmd == nil {
 			t.Fatal("second ctrl+c inside the window should quit")
@@ -310,10 +308,10 @@ func TestCtrlCStateMachine(t *testing.T) {
 		now := base
 		m := hangWorking(t)
 		m.clock = func() time.Time { return now }
-		tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+		tm, _ := m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
 		m = tm.(Model)
 		now = base.Add(2 * time.Second)
-		tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+		tm, cmd := m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
 		m = tm.(Model)
 		if m.quitting {
 			t.Fatal("ctrl+c after the window should cancel again")
@@ -340,7 +338,7 @@ func TestCtrlCStateMachine(t *testing.T) {
 		if !m.cardOpen() || m.status != statusWorking {
 			t.Fatalf("setup: pending=%v status=%s", m.cardOpen(), m.status)
 		}
-		tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+		tm, cmd := m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
 		m = tm.(Model)
 		if m.quitting {
 			t.Fatal("ctrl+c with a pending request should cancel, not quit")
@@ -365,14 +363,14 @@ func TestCtrlCStateMachine(t *testing.T) {
 		now := base
 		m := hangWorking(t)
 		m.clock = func() time.Time { return now }
-		tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+		tm, _ := m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
 		m = tm.(Model)
-		tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+		tm, _ = m.Update(runeKey('x'))
 		m = tm.(Model)
 		if !m.ctrlCDeadline.IsZero() {
 			t.Fatalf("deadline should be cleared, got %v", m.ctrlCDeadline)
 		}
-		tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+		tm, cmd := m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
 		m = tm.(Model)
 		if m.quitting {
 			t.Fatal("ctrl+c after another key should cancel, not quit")
@@ -560,11 +558,11 @@ func TestEnterDuringAForeignTurnTheModelHasNotSeenQueuesInstead(t *testing.T) {
 	if !strings.Contains(plainView(m), "#1 mine") {
 		t.Fatalf("the row is not on screen:\n%s", plainView(m))
 	}
-	withdrawn := pumpKey(t, m, tea.KeyMsg{Type: tea.KeyUp})
+	withdrawn := pumpKey(t, m, tea.KeyPressMsg{Code: tea.KeyUp})
 	if !withdrawn.queueFocus {
 		t.Fatalf("↑ did not reach the band:\n%s", plainView(withdrawn))
 	}
-	withdrawn = pumpKey(t, withdrawn, tea.KeyMsg{Type: tea.KeyBackspace})
+	withdrawn = pumpKey(t, withdrawn, tea.KeyPressMsg{Code: tea.KeyBackspace})
 	if !queueEmpty(withdrawn) {
 		t.Fatalf("the row could not be taken back: %q", queueTexts(withdrawn))
 	}
@@ -617,7 +615,7 @@ func TestPermissionOverlayKeys(t *testing.T) {
 	if !strings.Contains(plainView(m), "permission Shell") {
 		t.Fatalf("missing overlay:\n%s", plainView(m))
 	}
-	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	tm, _ := m.Update(runeKey('a'))
 	m = tm.(Model)
 	if m.cardOpen() {
 		t.Fatal("overlay should clear")
@@ -632,7 +630,7 @@ func TestPermissionOverlayKeys(t *testing.T) {
 func TestPermissionOverlayPinnedKeys(t *testing.T) {
 	t.Run("q does not quit", func(t *testing.T) {
 		m := withOverlay(t)
-		tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+		tm, cmd := m.Update(runeKey('q'))
 		m = tm.(Model)
 		if m.quitting || cmd != nil {
 			t.Fatal("bare q must not quit during a permission overlay")
@@ -643,7 +641,7 @@ func TestPermissionOverlayPinnedKeys(t *testing.T) {
 	})
 	t.Run("ctrl+c quits", func(t *testing.T) {
 		m := withOverlay(t)
-		tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+		tm, cmd := m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
 		m = tm.(Model)
 		if !m.quitting || cmd == nil {
 			t.Fatal("ctrl+c should quit during permission overlay")
@@ -652,7 +650,7 @@ func TestPermissionOverlayPinnedKeys(t *testing.T) {
 	})
 	t.Run("ctrl+d quits", func(t *testing.T) {
 		m := withOverlay(t)
-		tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlD})
+		tm, cmd := m.Update(tea.KeyPressMsg{Code: 'd', Mod: tea.ModCtrl})
 		m = tm.(Model)
 		if !m.quitting || cmd == nil {
 			t.Fatal("ctrl+d should quit during permission overlay")
@@ -661,7 +659,7 @@ func TestPermissionOverlayPinnedKeys(t *testing.T) {
 	})
 	t.Run("esc cancels overlay", func(t *testing.T) {
 		m := withOverlay(t)
-		tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+		tm, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
 		m = tm.(Model)
 		if m.cardOpen() {
 			t.Fatal("esc should clear the permission overlay")
@@ -685,7 +683,7 @@ func TestTranscriptPageUpStaysPut(t *testing.T) {
 		t.Fatal("expected stick-to-bottom to leave a non-zero YOffset")
 	}
 	bottom := m.vp.YOffset
-	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyPgUp})
+	tm, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyPgUp})
 	m = tm.(Model)
 	if m.vp.YOffset >= bottom {
 		t.Fatalf("page up did not scroll: YOffset %d (bottom %d)", m.vp.YOffset, bottom)
@@ -787,7 +785,7 @@ func TestThoughtsCoalesceSeparately(t *testing.T) {
 func TestAltEnterInsertsNewline(t *testing.T) {
 	m := sized(t)
 	m.input.SetValue("hello")
-	tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter, Alt: true})
+	tm, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModAlt})
 	m = tm.(Model)
 	if m.status != statusIdle {
 		t.Fatalf("alt+enter sent a prompt, status %s", m.status)
@@ -807,7 +805,7 @@ func TestShiftTabCyclesMode(t *testing.T) {
 	if m.snap.CurrentMode != "agent" {
 		t.Fatalf("start mode %q", m.snap.CurrentMode)
 	}
-	tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+	tm, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
 	m = tm.(Model)
 	if m.snap.CurrentMode != "plan" {
 		t.Fatalf("optimistic mode %q", m.snap.CurrentMode)
@@ -825,7 +823,7 @@ func TestShiftTabCyclesMode(t *testing.T) {
 
 func TestShiftTabIgnoredDuringPermission(t *testing.T) {
 	m := withOverlay(t)
-	tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+	tm, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
 	m = tm.(Model)
 	if cmd != nil {
 		t.Fatal("shift+tab should be ignored on the permission overlay")
@@ -880,7 +878,7 @@ func TestSlashHelpExitAndModel(t *testing.T) {
 func TestTabCompletesSlash(t *testing.T) {
 	m := sized(t)
 	m.input.SetValue("/he")
-	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	tm, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
 	m = tm.(Model)
 	// Accepting ends the token with a space, which is what closes the menu.
 	if m.input.Value() != "/help " {
@@ -922,7 +920,7 @@ func TestEscOnHelpClosesNotQuits(t *testing.T) {
 	if m.dialog != dialogHelp {
 		t.Fatal("expected help")
 	}
-	tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	tm, cmd := m.Update(runeKey('q'))
 	m = tm.(Model)
 	if m.dialog != dialogHelp {
 		t.Fatal("q must not close help")
@@ -930,7 +928,7 @@ func TestEscOnHelpClosesNotQuits(t *testing.T) {
 	if m.quitting || cmd != nil {
 		t.Fatal("q on help must not quit or run a command")
 	}
-	tm, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	tm, cmd = m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
 	m = tm.(Model)
 	if m.dialog == dialogHelp {
 		t.Fatal("esc should close help")
@@ -948,7 +946,7 @@ func TestEscOnModelDialogClosesNotQuits(t *testing.T) {
 	if m.dialog != dialogModel {
 		t.Fatal("expected the model dialog")
 	}
-	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	tm, _ = m.Update(runeKey('q'))
 	m = tm.(Model)
 	if m.dialog != dialogModel {
 		t.Fatal("q must not close the dialog")
@@ -959,7 +957,7 @@ func TestEscOnModelDialogClosesNotQuits(t *testing.T) {
 	if m.mdlg.filter.Value() != "q" {
 		t.Fatalf("q should have filtered, got %q", m.mdlg.filter.Value())
 	}
-	tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	tm, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
 	m = tm.(Model)
 	if m.dialog != dialogNone {
 		t.Fatal("esc should close the dialog")
@@ -975,7 +973,7 @@ func TestEscSlashKeepsComposerText(t *testing.T) {
 	if !m.slashMenuOpen() {
 		t.Fatal("expected slash menu")
 	}
-	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	tm, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
 	m = tm.(Model)
 	if m.input.Value() != "/he" {
 		t.Fatalf("esc cleared composer: %q", m.input.Value())
@@ -1187,7 +1185,7 @@ func TestModelDialogCurrentFirstAndFilters(t *testing.T) {
 func typeInto(t *testing.T, m Model, text string) Model {
 	t.Helper()
 	for _, r := range text {
-		tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		tm, _ := m.Update(runeKey(r))
 		m = tm.(Model)
 	}
 	return m
@@ -1230,11 +1228,11 @@ func TestModelDialogAppliesModelEffortAndFast(t *testing.T) {
 	tm, _ := m.Update(enter())
 	m = tm.(Model)
 	// Model: the second row. Effort: one right. Fast: one right.
-	m = pressKey(t, m, tea.KeyDown)
-	m = pressKey(t, m, tea.KeyTab)
-	m = pressKey(t, m, tea.KeyRight)
-	m = pressKey(t, m, tea.KeyTab)
-	m = pressKey(t, m, tea.KeyRight)
+	m = pressKey(t, m, "down")
+	m = pressKey(t, m, "tab")
+	m = pressKey(t, m, "right")
+	m = pressKey(t, m, "tab")
+	m = pressKey(t, m, "right")
 	tm, cmd := m.Update(enter())
 	m = tm.(Model)
 	if m.dialog != dialogNone {
@@ -1261,9 +1259,9 @@ func TestModelDialogAppliesModelEffortAndFast(t *testing.T) {
 	}
 }
 
-func pressKey(t *testing.T, m Model, k tea.KeyType) Model {
+func pressKey(t *testing.T, m Model, k string) Model {
 	t.Helper()
-	tm, _ := m.Update(tea.KeyMsg{Type: k})
+	tm, _ := m.Update(testKey(k))
 	return tm.(Model)
 }
 
@@ -1304,11 +1302,11 @@ func TestModelDialogStepFailures(t *testing.T) {
 			m.input.SetValue("/model")
 			tm, _ := m.Update(enter())
 			m = tm.(Model)
-			m = pressKey(t, m, tea.KeyDown)
-			m = pressKey(t, m, tea.KeyTab)
-			m = pressKey(t, m, tea.KeyRight)
-			m = pressKey(t, m, tea.KeyTab)
-			m = pressKey(t, m, tea.KeyRight)
+			m = pressKey(t, m, "down")
+			m = pressKey(t, m, "tab")
+			m = pressKey(t, m, "right")
+			m = pressKey(t, m, "tab")
+			m = pressKey(t, m, "right")
 			tc.fail(stub)
 			tm, cmd := m.Update(enter())
 			m = tm.(Model)
@@ -1348,15 +1346,15 @@ func TestModelDialogStaleFailureKeepsTheNewerChoice(t *testing.T) {
 	}
 	// medium → high, holding its command.
 	m = m.openModelDialog()
-	m = pressKey(t, m, tea.KeyTab)
-	m = pressKey(t, m, tea.KeyRight)
+	m = pressKey(t, m, "tab")
+	m = pressKey(t, m, "right")
 	tm, high := m.Update(enter())
 	m = tm.(Model)
 	// The user reopens the box and picks low, which answers second.
 	m = m.openModelDialog()
-	m = pressKey(t, m, tea.KeyTab)
-	m = pressKey(t, m, tea.KeyLeft)
-	m = pressKey(t, m, tea.KeyLeft)
+	m = pressKey(t, m, "tab")
+	m = pressKey(t, m, "left")
+	m = pressKey(t, m, "left")
 	if m.mdlg.chosen["effort"] != "low" {
 		t.Fatalf("the reopened box is on %q", m.mdlg.chosen["effort"])
 	}
@@ -1396,11 +1394,11 @@ func TestModelDialogTabSkipsMissingRows(t *testing.T) {
 	if strings.Contains(plainView(m), "[off]") {
 		t.Fatalf("a session with no fast option draws no fast row:\n%s", plainView(m))
 	}
-	m = pressKey(t, m, tea.KeyTab)
+	m = pressKey(t, m, "tab")
 	if m.mdlg.focus != dialogFocus("effort") {
 		t.Fatalf("focus %v", m.mdlg.focus)
 	}
-	m = pressKey(t, m, tea.KeyTab)
+	m = pressKey(t, m, "tab")
 	if m.mdlg.focus != focusList {
 		t.Fatalf("tab should wrap back to the list, got %v", m.mdlg.focus)
 	}
@@ -1460,7 +1458,7 @@ func TestSetModeFailureKeepsWorkingStatus(t *testing.T) {
 	tm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 	m = startedLikeInit(t, tm.(Model))
 	m.status = statusWorking
-	tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+	tm, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
 	m = tm.(Model)
 	if m.snap.CurrentMode != "plan" {
 		t.Fatalf("optimistic %q", m.snap.CurrentMode)
@@ -1792,7 +1790,7 @@ func TestStalePlanImplementAnswerLeavesTheNewerRequestAlone(t *testing.T) {
 	// offer did.
 	var cycle tea.Cmd
 	for range 3 {
-		tm, cycle = m.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+		tm, cycle = m.Update(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
 		m = tm.(Model)
 	}
 	if m.snap.CurrentMode != "agent" || m.modeInFlight != "agent" {
@@ -2143,7 +2141,7 @@ func TestClearThenToolUpdateAppends(t *testing.T) {
 // in flight.
 func intoPlanMode(t *testing.T, m Model) Model {
 	t.Helper()
-	tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+	tm, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
 	m = tm.(Model)
 	msg := runCmd(cmd)
 	// The generation is whatever this model is up to, so the assertion is on
@@ -2368,7 +2366,7 @@ func TestPlanOfferCleared(t *testing.T) {
 			return feed(t, m, agent.Event{Type: agent.EventMeta, Mode: "plan"})
 		}},
 		{"the user changes the mode", func(t *testing.T, m Model) Model {
-			tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+			tm, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
 			return tm.(Model)
 		}},
 		{"the next send", func(t *testing.T, m Model) Model {
@@ -2401,7 +2399,7 @@ func TestPlanOfferHiddenWhileTyping(t *testing.T) {
 	if !m.planArmed() {
 		t.Fatal("typing refines the plan, it does not decline the offer")
 	}
-	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+	tm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyBackspace})
 	m = tm.(Model)
 	if m.input.Value() != "" {
 		t.Fatalf("draft %q", m.input.Value())
@@ -2416,7 +2414,7 @@ func TestPlanOfferEscKeepsFocus(t *testing.T) {
 	if !m.input.Focused() {
 		t.Fatal("the composer starts focused")
 	}
-	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	tm, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
 	m = tm.(Model)
 	if m.planArmed() {
 		t.Fatal("esc declines the offer")
@@ -2853,140 +2851,18 @@ func TestPlanOfferSurvivesACreatePlanCard(t *testing.T) {
 	}
 }
 
-// windowTitleMsgs walks a batched Cmd for every tea.SetWindowTitle it carries,
-// rendered with fmt.Sprint. bubbletea's setWindowTitleMsg is an unexported
-// string type, so identifying it by its reflected type name and reading its
-// value through fmt.Sprint is the only way in from outside the package
-// (§3.10).
-//
-// The tick chain rides in the same batch (Update arms it last) and a real
-// tea.Tick command sleeps for its own duration before returning — up to a
-// minute, when the model is idle — so it is skipped by function name via
-// runtime.FuncForPC rather than called: this walk must stay instant however
-// far from a minute boundary the wall clock happens to be when it runs.
-func windowTitleMsgs(cmd tea.Cmd) []string {
-	var out []string
-	var walk func(tea.Cmd)
-	walk = func(c tea.Cmd) {
-		if c == nil {
-			return
-		}
-		if name := runtime.FuncForPC(reflect.ValueOf(c).Pointer()).Name(); strings.Contains(name, "bubbletea.Tick") {
-			return
-		}
-		msg := c()
-		if msg == nil {
-			return
-		}
-		if batch, ok := msg.(tea.BatchMsg); ok {
-			for _, sub := range batch {
-				walk(sub)
-			}
-			return
-		}
-		if strings.Contains(fmt.Sprintf("%T", msg), "WindowTitleMsg") {
-			out = append(out, fmt.Sprint(msg))
-		}
-	}
-	walk(cmd)
-	return out
-}
-
-// titledStub is startStub with the tab title switched on (every other test
-// model leaves Config.TerminalTitle false, the tested default), sized but not
-// yet started, so the caller can watch the very first title alongside every
-// later transition.
-func titledStub(t *testing.T, stub *Stub, ws string) Model {
-	t.Helper()
-	isolateSkillsHome(t)
-	m := New(Config{
-		Session:       stub,
-		Theme:         "tokyo-night",
-		Workspace:     ws,
-		Model:         "grok",
-		Yolo:          true,
-		TerminalTitle: true,
-	})
-	tm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
-	return tm.(Model)
-}
-
-// TestWindowTitleCmdOnSizing is the pre-start moment: New alone sets no
-// title (windowTitle is pure and the wrapper never ran), but the very first
-// Update — sizing the frame, exactly as Run's first WindowSizeMsg does —
-// already carries the pre-title "✦ craze", because no handler sets the title
-// itself and this is the one comparison every transition passes through.
-func TestWindowTitleCmdOnSizing(t *testing.T) {
-	isolateSkillsHome(t)
-	m := New(Config{
-		Session:       NewStub(),
-		Theme:         "tokyo-night",
-		Workspace:     t.TempDir(),
-		Yolo:          true,
-		TerminalTitle: true,
-	})
-	tm, cmd := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
-	m = tm.(Model)
-	if got := windowTitleMsgs(cmd); len(got) != 1 || got[0] != "✦ craze" {
-		t.Fatalf("first sizing = %v, want one %q", got, "✦ craze")
-	}
-	if m.lastTitle != "✦ craze" {
-		t.Fatalf("lastTitle = %q, want %q", m.lastTitle, "✦ craze")
-	}
-}
-
-// TestWindowTitleCmdFiresOnceOnChangeOnly is the write-only-on-change
-// contract: a status change re-fires exactly once, and a message that leaves
-// every input to windowTitle() untouched fires it not at all, however many
-// times Update runs.
-func TestWindowTitleCmdFiresOnceOnChangeOnly(t *testing.T) {
-	m := titledStub(t, NewStub(), t.TempDir())
-
-	tm, cmd := m.Update(startedMsg{})
-	m = tm.(Model)
-	if got := windowTitleMsgs(cmd); len(got) != 0 {
-		t.Fatalf("startedMsg while still idle should not re-fire the title: %v", got)
-	}
-
-	m.input.SetValue("go")
-	tm, cmd = m.Update(enter())
-	m = tm.(Model)
-	if m.status != statusWorking {
-		t.Fatalf("the send should have started a turn: status %v", m.status)
-	}
-	if got := windowTitleMsgs(cmd); len(got) != 1 || got[0] != "❖ craze" {
-		t.Fatalf("status -> working = %v, want one %q", got, "❖ craze")
-	}
-
-	// Unrelated to the title: still working, no card, same text. Run it twice
-	// so a bug that fires on every Update rather than on change shows up
-	// however many times the assertion below is repeated.
-	for i := 0; i < 2; i++ {
-		tm, cmd = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
-		m = tm.(Model)
-		if got := windowTitleMsgs(cmd); len(got) != 0 {
-			t.Fatalf("an unrelated resize should not re-fire the title: %v", got)
-		}
-	}
-}
-
-// TestWindowTitleOffSwitchEmitsNothing is Config.TerminalTitle's false path:
-// every existing test model leaves it off, and this pins that the reason is a
-// gate the Update wrapper actually honours, not an accident of the zero
-// value never being exercised.
-func TestWindowTitleOffSwitchEmitsNothing(t *testing.T) {
-	isolateSkillsHome(t)
+func TestWindowTitleFollowsRenderedSession(t *testing.T) {
 	m := startStub(t, NewStub(), t.TempDir(), 80, 24)
-	if m.terminalTitle {
-		t.Fatal("startStub's Config never sets TerminalTitle, so this must be false")
+	if got := m.View().WindowTitle; got != "" {
+		t.Fatalf("title disabled: %q", got)
+	}
+	m.terminalTitle = true
+	if got := m.View().WindowTitle; got != "✦ craze" {
+		t.Fatalf("idle title: %q", got)
 	}
 	m.input.SetValue("go")
-	tm, cmd := m.Update(enter())
-	m = tm.(Model)
-	if got := windowTitleMsgs(cmd); len(got) != 0 {
-		t.Fatalf("terminal_title off should never emit a title: %v", got)
-	}
-	if m.lastTitle != "" {
-		t.Fatalf("lastTitle should stay empty with the title off, got %q", m.lastTitle)
+	next, _ := m.Update(enter())
+	if got := next.(Model).View().WindowTitle; got != "❖ craze" {
+		t.Fatalf("working title: %q", got)
 	}
 }

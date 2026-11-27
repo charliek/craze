@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/backend"
@@ -197,11 +197,11 @@ func TestALaunchSpawnsItsKnownSessionAndAdoptsIt(t *testing.T) {
 func TestAPickersChoiceIsSpawned(t *testing.T) {
 	for _, tc := range []struct {
 		name string
-		keys []tea.KeyMsg
+		keys []tea.KeyPressMsg
 		want spawnCall
 	}{
-		{"enter on a row", []tea.KeyMsg{{Type: tea.KeyDown}, enter()}, spawnCall{provider: "grok", explicit: true}},
-		{"esc", []tea.KeyMsg{{Type: tea.KeyEsc}}, spawnCall{provider: "cursor"}},
+		{"enter on a row", []tea.KeyPressMsg{{Code: tea.KeyDown}, enter()}, spawnCall{provider: "grok", explicit: true}},
+		{"esc", []tea.KeyPressMsg{{Code: tea.KeyEsc}}, spawnCall{provider: "cursor"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ws := t.TempDir()
@@ -384,7 +384,7 @@ func TestASpawnAnsweredTooLateIsClosed(t *testing.T) {
 		m := sizedModel(cfg)
 		msg := spawnedBy(t, m.Init())
 		if quit {
-			tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlD})
+			tm, _ := m.Update(tea.KeyPressMsg{Code: 'd', Mod: tea.ModCtrl})
 			m = tm.(Model)
 		} else {
 			msg.attempt++
@@ -418,9 +418,9 @@ func TestKeysWhileSpawningNeedNoSession(t *testing.T) {
 	cfg.ProviderLocked = true
 	m := sizedModel(cfg)
 	cmd := m.Init()
-	keys := []tea.KeyMsg{
-		{Type: tea.KeyRunes, Runes: []rune("hello")}, enter(), {Type: tea.KeyShiftTab}, {Type: tea.KeyEsc},
-		{Type: tea.KeyCtrlT}, {Type: tea.KeyCtrlT}, {Type: tea.KeyCtrlO}, {Type: tea.KeyUp}, {Type: tea.KeyDown},
+	keys := []tea.KeyPressMsg{
+		{Code: tea.KeyExtended, Text: "hello"}, enter(), {Code: tea.KeyTab, Mod: tea.ModShift}, {Code: tea.KeyEsc},
+		{Code: 't', Mod: tea.ModCtrl}, {Code: 't', Mod: tea.ModCtrl}, {Code: 'o', Mod: tea.ModCtrl}, {Code: tea.KeyUp}, {Code: tea.KeyDown},
 	}
 	for _, k := range keys {
 		tm, _ := m.Update(k)
@@ -510,7 +510,7 @@ func TestTheStartIsAcknowledgedOnlyWhenApplied(t *testing.T) {
 				t.Fatalf("Start's answer alone acknowledged %d times", n)
 			}
 			if tc.quit {
-				tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlD})
+				tm, _ = m.Update(tea.KeyPressMsg{Code: 'd', Mod: tea.ModCtrl})
 				m = tm.(Model)
 				if !m.quitting {
 					t.Fatal("the premise: Ctrl+D is quitting")

@@ -7,7 +7,7 @@ import (
 	"sync"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/charliek/craze/internal/agent"
 )
@@ -380,11 +380,11 @@ func TestAnUntouchedTabFollowsTheLiveValueAndIsNotSent(t *testing.T) {
 	m, stub := cursorStub(t, "claude-opus-5")
 	m = openDialog(t, m)
 	for range 3 {
-		m = pressKey(t, m, tea.KeyTab) // thinking, context, effort
+		m = pressKey(t, m, "tab") // thinking, context, effort
 	}
-	m = pressKey(t, m, tea.KeyLeft) // effort → medium
-	m = pressKey(t, m, tea.KeyTab)
-	m = pressKey(t, m, tea.KeyRight) // fast → on
+	m = pressKey(t, m, "left") // effort → medium
+	m = pressKey(t, m, "tab")
+	m = pressKey(t, m, "right") // fast → on
 
 	// Another client moves the two options the user left alone, and the one
 	// the user chose.

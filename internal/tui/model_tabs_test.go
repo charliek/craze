@@ -8,8 +8,8 @@ import (
 	"sync"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/backend"
@@ -231,9 +231,9 @@ func TestAnAdvertisedTabIsShownWhateverTheCapabilityBit(t *testing.T) {
 	if !strings.Contains(view, "  fast  [off]  on") || !strings.Contains(view, modelDialogHint) {
 		t.Fatalf("the advertised fast option should be a tab:\n%s", view)
 	}
-	m = pressKey(t, m, tea.KeyTab)
-	m = pressKey(t, m, tea.KeyTab)
-	m = pressKey(t, m, tea.KeyRight)
+	m = pressKey(t, m, "tab")
+	m = pressKey(t, m, "tab")
+	m = pressKey(t, m, "right")
 	m = applyDialog(t, m)
 	if !agent.FastOn(stub.Snapshot()) {
 		t.Fatalf("fast was not applied: %+v", stub.Snapshot().Config)
@@ -335,7 +335,7 @@ func TestTheDialogsTabsFollowTheModel(t *testing.T) {
 	}
 	// Tab reaches them in that order.
 	for _, id := range []string{"thinking", "context", "effort", "fast", ""} {
-		m = pressKey(t, m, tea.KeyTab)
+		m = pressKey(t, m, "tab")
 		if m.mdlg.focus != dialogFocus(id) {
 			t.Fatalf("tab reached %q, want %q", m.mdlg.focus, id)
 		}
@@ -418,10 +418,10 @@ func TestTheDialogReResolvesItsStepsOnTheModelItSwitchedTo(t *testing.T) {
 			m = openDialog(t, m)
 			m = typeInto(t, m, tc.filter)
 			for _, presses := range []int{tc.effort, tc.fast} {
-				m = pressKey(t, m, tea.KeyTab)
-				key, n := tea.KeyRight, presses
+				m = pressKey(t, m, "tab")
+				key, n := "right", presses
 				if n < 0 {
-					key, n = tea.KeyLeft, -n
+					key, n = "left", -n
 				}
 				for range n {
 					m = pressKey(t, m, key)
@@ -523,10 +523,10 @@ func TestAnotherClientsModelChangeMidChainIsANote(t *testing.T) {
 				m, stub := cursorStub(t, "grok-4.6")
 				m = openDialog(t, m)
 				m = typeInto(t, m, tc.filter)
-				m = pressKey(t, m, tea.KeyTab)
-				m = pressKey(t, m, tea.KeyLeft) // effort → low
-				m = pressKey(t, m, tea.KeyTab)
-				m = pressKey(t, m, tea.KeyRight) // fast → on
+				m = pressKey(t, m, "tab")
+				m = pressKey(t, m, "left") // effort → low
+				m = pressKey(t, m, "tab")
+				m = pressKey(t, m, "right") // fast → on
 				sets := &staleSets{Backend: m.eng}
 				m.eng = sets
 				if !tc.armAfterEnter {
@@ -613,12 +613,12 @@ func (b *staleSets) count() int {
 func TestAnOptionGoneIsANoteAndTheChainGoesOn(t *testing.T) {
 	m, stub := cursorStub(t, "claude-opus-5")
 	m = openDialog(t, m)
-	m = pressKey(t, m, tea.KeyTab)
-	m = pressKey(t, m, tea.KeyTab)
-	m = pressKey(t, m, tea.KeyLeft) // context → 300k
-	m = pressKey(t, m, tea.KeyTab)
-	m = pressKey(t, m, tea.KeyTab)
-	m = pressKey(t, m, tea.KeyRight) // fast → on
+	m = pressKey(t, m, "tab")
+	m = pressKey(t, m, "tab")
+	m = pressKey(t, m, "left") // context → 300k
+	m = pressKey(t, m, "tab")
+	m = pressKey(t, m, "tab")
+	m = pressKey(t, m, "right") // fast → on
 	stub.DropOptionOnSet("context")
 	m = applyDialog(t, m)
 	want := []string{"context not applied: claude-opus-5 has no context", "fast → on"}
@@ -673,8 +673,8 @@ func TestEachStepIsJudgedOnTheLatestCatalog(t *testing.T) {
 			m = openDialog(t, m)
 			m = typeInto(t, m, tc.filter)
 			// effort → low, fast → on, context → 300k
-			for _, key := range []tea.KeyType{tea.KeyLeft, tea.KeyRight, tea.KeyLeft} {
-				m = pressKey(t, m, tea.KeyTab)
+			for _, key := range []string{"left", "right", "left"} {
+				m = pressKey(t, m, "tab")
 				m = pressKey(t, m, key)
 			}
 			m = applyDialog(t, m)
@@ -707,8 +707,8 @@ func TestEachStepIsJudgedOnTheLatestCatalog(t *testing.T) {
 func TestATouchedChoiceIsJudgedOnTheDestination(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
-		key        tea.KeyType // on effort, from grok-4.6's medium
-		moveSource bool        // another client puts grok-4.6 on the choice
+		key        string // on effort, from grok-4.6's medium
+		moveSource bool   // another client puts grok-4.6 on the choice
 		wantWrites []string
 		wantNotes  []string
 		wantLabel  string
@@ -716,7 +716,7 @@ func TestATouchedChoiceIsJudgedOnTheDestination(t *testing.T) {
 		{
 			// astra's schedule: low is chosen for claude-opus-5, which is on
 			// high, and grok-4.6 is then moved to low under the open box.
-			name: "the source moved onto the choice", key: tea.KeyLeft, moveSource: true,
+			name: "the source moved onto the choice", key: "left", moveSource: true,
 			wantWrites: []string{"effort=low"},
 			wantNotes:  []string{"model → claude-opus-5", "effort → low"},
 			wantLabel:  "Claude Opus 5 (low)",
@@ -726,7 +726,7 @@ func TestATouchedChoiceIsJudgedOnTheDestination(t *testing.T) {
 			// a choice dropped for equalling a value the session only seems to
 			// hold is lost to a change that lands after the read (astra r6;
 			// X15's silent drop withdrawn).
-			name: "the destination already holds the choice", key: tea.KeyRight,
+			name: "the destination already holds the choice", key: "right",
 			wantWrites: []string{"effort=high"},
 			wantNotes:  []string{"model → claude-opus-5", "effort → high"},
 			wantLabel:  "Claude Opus 5 (high)",
@@ -736,7 +736,7 @@ func TestATouchedChoiceIsJudgedOnTheDestination(t *testing.T) {
 			m, stub := cursorStub(t, "grok-4.6")
 			m = openDialog(t, m)
 			m = typeInto(t, m, "claude")
-			m = pressKey(t, m, tea.KeyTab)
+			m = pressKey(t, m, "tab")
 			m = pressKey(t, m, tc.key)
 			if tc.moveSource {
 				if _, err := stub.SetConfig(context.Background(), stubOtherClient, "effort", "low", ""); err != nil {
@@ -880,10 +880,10 @@ func TestALaterChoiceLandsAfterTheChangeStillOutstanding(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		readBack bool
-		keys     []tea.KeyType // on effort, in the reopened box
+		keys     []string // on effort, in the reopened box
 	}{
-		{name: "the rows show the change", keys: []tea.KeyType{tea.KeyLeft}},
-		{name: "the rows are refreshed under it", readBack: true, keys: []tea.KeyType{tea.KeyLeft}},
+		{name: "the rows show the change", keys: []string{"left"}},
+		{name: "the rows are refreshed under it", readBack: true, keys: []string{"left"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			answerOrders(t, func(t *testing.T, deltasFirst bool) {
@@ -894,8 +894,8 @@ func TestALaterChoiceLandsAfterTheChangeStillOutstanding(t *testing.T) {
 				t.Cleanup(release)
 
 				m = openDialog(t, m)
-				m = pressKey(t, m, tea.KeyTab)
-				m = pressKey(t, m, tea.KeyRight) // effort → high
+				m = pressKey(t, m, "tab")
+				m = pressKey(t, m, "right") // effort → high
 				tm, cmd := m.Update(enter())
 				m = tm.(Model)
 				first := goCmd(cmd)
@@ -913,7 +913,7 @@ func TestALaterChoiceLandsAfterTheChangeStillOutstanding(t *testing.T) {
 				}
 
 				m = openDialog(t, m)
-				m = pressKey(t, m, tea.KeyTab)
+				m = pressKey(t, m, "tab")
 				for _, k := range tc.keys {
 					m = pressKey(t, m, k)
 				}
@@ -959,9 +959,9 @@ func TestAChoiceTheSessionAlreadyHoldsIsStillSent(t *testing.T) {
 		m, stub := cursorStub(t, "grok-4.6")
 		writes := configWrites(stub)
 		m = openDialog(t, m)
-		m = pressKey(t, m, tea.KeyTab)
-		m = pressKey(t, m, tea.KeyRight) // effort → high
-		m = pressKey(t, m, tea.KeyLeft)  // and back to medium
+		m = pressKey(t, m, "tab")
+		m = pressKey(t, m, "right") // effort → high
+		m = pressKey(t, m, "left")  // and back to medium
 		if got := m.mdlg.chosen["effort"]; got != "medium" || !m.mdlg.touched["effort"] {
 			t.Fatalf("the box is on %q, touched %v", got, m.mdlg.touched["effort"])
 		}
@@ -1051,8 +1051,8 @@ func TestAChoiceForTheModelBeingSwitchedToWaitsForTheSwitch(t *testing.T) {
 				if list := m.dialogModelList(); list[m.mdlg.sel].ID != "claude-opus-5" {
 					t.Fatalf("the box opened on %q, want the model the screen shows", list[m.mdlg.sel].ID)
 				}
-				m = pressKey(t, m, tea.KeyTab)
-				m = pressKey(t, m, tea.KeyLeft) // effort → low
+				m = pressKey(t, m, "tab")
+				m = pressKey(t, m, "left") // effort → low
 				if got := m.mdlg.chosen["effort"]; got != "low" {
 					t.Fatalf("the reopened box is on %q", got)
 				}
@@ -1087,10 +1087,10 @@ func TestAChoiceForTheModelBeingSwitchedToWaitsForTheSwitch(t *testing.T) {
 // applyEffort reopens the box, moves its first tab — effort, on the grok-4.6
 // catalog the screen shows in these schedules — by keys onto want, and presses
 // Enter. The command comes back unrun, for the test to start when it chooses.
-func applyEffort(t *testing.T, m Model, want string, keys ...tea.KeyType) (Model, tea.Cmd) {
+func applyEffort(t *testing.T, m Model, want string, keys ...string) (Model, tea.Cmd) {
 	t.Helper()
 	m = openDialog(t, m)
-	m = pressKey(t, m, tea.KeyTab)
+	m = pressKey(t, m, "tab")
 	for _, k := range keys {
 		m = pressKey(t, m, k)
 	}
@@ -1141,11 +1141,11 @@ func TestLaterChoicesLandInTheOrderTheyWereMade(t *testing.T) {
 		held, release := stub.HoldNextSet()
 		t.Cleanup(release)
 
-		m, high := applyEffort(t, m, "high", tea.KeyRight) // from medium
+		m, high := applyEffort(t, m, "high", "right") // from medium
 		a := goCmd(high)
 		waitClosed(t, held, "high's setter")
-		m, low := applyEffort(t, m, "low", tea.KeyLeft, tea.KeyLeft)
-		m, xhigh := applyEffort(t, m, "xhigh", tea.KeyRight, tea.KeyRight, tea.KeyRight)
+		m, low := applyEffort(t, m, "low", "left", "left")
+		m, xhigh := applyEffort(t, m, "xhigh", "right", "right", "right")
 		b, c := startReversed(t, waits, low, xhigh)
 		release()
 		m = deliverAnswers(t, m, stub, deltasFirst,
@@ -1190,12 +1190,12 @@ func TestAChoiceForTheModelBeingSwitchedToWaitsForAnEarlierSwitch(t *testing.T) 
 				held, release := stub.HoldNextSet()
 				t.Cleanup(release)
 
-				m, high := applyEffort(t, m, "high", tea.KeyRight) // from medium
+				m, high := applyEffort(t, m, "high", "right") // from medium
 				a := goCmd(high)
 				waitClosed(t, held, "high's setter")
 				m, toClaude := sw.switchTo(t, m)
 				// The rows are still grok-4.6's, on the high applied above.
-				m, low := applyEffort(t, m, "low", tea.KeyLeft, tea.KeyLeft)
+				m, low := applyEffort(t, m, "low", "left", "left")
 				b, c := startReversed(t, waits, toClaude, low)
 				release()
 				m = deliverAnswers(t, m, stub, deltasFirst,
@@ -1241,8 +1241,8 @@ func TestAChainWhoseCommandNeverRunsStillRunsInItsPlace(t *testing.T) {
 			answerOrders(t, func(t *testing.T, deltasFirst bool) {
 				m, stub := cursorStub(t, "grok-4.6")
 				writes := configWrites(stub)
-				m, _ = sw.switchTo(t, m)                        // its command discarded, never run
-				m, low := applyEffort(t, m, "low", tea.KeyLeft) // from grok-4.6's medium
+				m, _ = sw.switchTo(t, m)                   // its command discarded, never run
+				m, low := applyEffort(t, m, "low", "left") // from grok-4.6's medium
 				msg := received(t, goCmd(low), "low's command")
 				if applied, ok := msg.(modelApplyMsg); !ok || applied.err != nil {
 					t.Fatalf("low's command came back %+v", msg)
@@ -1288,9 +1288,9 @@ func TestAnEmptyInstalledValueSettlesAsItIs(t *testing.T) {
 		})
 		m = openDialog(t, m)
 		for range 3 {
-			m = pressKey(t, m, tea.KeyTab) // thinking, context, effort
+			m = pressKey(t, m, "tab") // thinking, context, effort
 		}
-		m = pressKey(t, m, tea.KeyRight) // effort → xhigh
+		m = pressKey(t, m, "right") // effort → xhigh
 		tm, cmd := m.Update(enter())
 		m = tm.(Model)
 		applied, ok := runCmd(cmd).(modelApplyMsg)
@@ -1355,8 +1355,8 @@ func TestADuplicateIDKeepsOneOccurrenceAndItsRole(t *testing.T) {
 	if !strings.Contains(view, "  thinking  [false]  true") || strings.Contains(view, "effort") {
 		t.Fatalf("the box should draw the first knob as thinking:\n%s", view)
 	}
-	m = pressKey(t, m, tea.KeyTab)
-	m = pressKey(t, m, tea.KeyRight) // thinking → true
+	m = pressKey(t, m, "tab")
+	m = pressKey(t, m, "right") // thinking → true
 	m = applyDialog(t, m)
 	if got := texts(m, entryNote); len(got) != 1 || got[0] != "thinking → true" {
 		t.Fatalf("notes %q", got)
@@ -1383,11 +1383,11 @@ func TestTheFocusedTabsOptionGoingHandsTheFocusBack(t *testing.T) {
 	m, stub := cursorStub(t, "claude-opus-5")
 	m = openDialog(t, m)
 	for range 3 {
-		m = pressKey(t, m, tea.KeyTab) // thinking, context, effort
+		m = pressKey(t, m, "tab") // thinking, context, effort
 	}
-	m = pressKey(t, m, tea.KeyRight)
-	m = pressKey(t, m, tea.KeyRight) // effort → max, which grok-4.6 does not offer
-	m = pressKey(t, m, tea.KeyShiftTab)
+	m = pressKey(t, m, "right")
+	m = pressKey(t, m, "right") // effort → max, which grok-4.6 does not offer
+	m = pressKey(t, m, "shift+tab")
 	if m.mdlg.focus != "context" || m.mdlg.chosen["effort"] != "max" {
 		t.Fatalf("focus %q, effort %q", m.mdlg.focus, m.mdlg.chosen["effort"])
 	}
@@ -1413,7 +1413,7 @@ func TestTheFocusedTabsOptionGoingHandsTheFocusBack(t *testing.T) {
 	if !strings.Contains(view, "  effort  low  [medium]  high  xhigh") || !strings.Contains(view, modelDialogHint) {
 		t.Fatalf("the box should be grok-4.6's:\n%s", view)
 	}
-	m = pressKey(t, m, tea.KeyTab)
+	m = pressKey(t, m, "tab")
 	if m.mdlg.focus != "effort" {
 		t.Fatalf("tab from the list reached %q", m.mdlg.focus)
 	}
@@ -1422,7 +1422,7 @@ func TestTheFocusedTabsOptionGoingHandsTheFocusBack(t *testing.T) {
 	// stays where the user now has it, and every tab is drawn on its option's
 	// value — effort too, whose max the repair above took back, so it is no
 	// choice of the user's any more and follows the model's own high.
-	m = pressKey(t, m, tea.KeyShiftTab)
+	m = pressKey(t, m, "shift+tab")
 	if _, err := stub.SetModel(context.Background(), stubOtherClient, "claude-opus-5"); err != nil {
 		t.Fatal(err)
 	}

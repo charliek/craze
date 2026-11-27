@@ -14,7 +14,6 @@ and fails the case if one will not go.
 
 from __future__ import annotations
 
-import codecs
 import json
 import os
 import re
@@ -27,7 +26,7 @@ from pathlib import Path
 import pytest
 from conftest import pid_alive, seed_host_idle_exit
 from test_detach import _entries
-from test_tui import _ANSI, PTYCraze
+from test_tui import PTYCraze
 
 WAIT = 10.0
 
@@ -51,162 +50,18 @@ def _detached(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     seed_host_idle_exit(tmp_path)
 
 
-# The end of one frame of bubbletea's alt-screen renderer: every flush starts
-# at the home position (ESC[H) and ends by putting the cursor on the frame's
-# last row, ESC[<rows>;H. craze's own output never positions the cursor so.
-_FRAME_END = re.compile(r"\x1b\[\d+;\d*H")
-
-
 class Screen:
-    """The terminal a PTYCraze draws on (80x24), with craze's output played
-    into it: what each row holds now.
+    """The current contents of this session's 80-by-24 terminal."""
 
-    It knows what bubbletea's renderer writes -- cursor moves, erasing to the
-    end of a line or of the screen, carriage returns and line feeds, printable
-    text one cell per character (every glyph the list draws is one cell) --
-    and passes over the rest (colours, modes, OSC strings). Only whole frames
-    are played (_FRAME_END): one frame can arrive in several reads of the pty,
-    and a screen read between them would be half one frame and half the last.
-    """
-
-    def __init__(self, tui: PTYCraze, rows: int = 24, cols: int = 80) -> None:
+    def __init__(self, tui: PTYCraze) -> None:
         self.tui = tui
-        self.nrows, self.ncols = rows, cols
-        self.grid = [[" "] * cols for _ in range(rows)]
-        self.row = self.col = 0
-        self.saved = (0, 0)
-        self.pos = 0
-        self.decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
-        self.pending = ""
+        self.nrows = len(tui.rows())
 
     def rows(self) -> list[str]:
-        """The screen now, one string per row, trailing blanks dropped."""
-        self._feed()
-        return ["".join(r).rstrip() for r in self.grid]
+        return list(self.tui.rows())
 
     def dump(self) -> str:
-        return "\n".join(self.rows())
-
-    def _feed(self) -> None:
-        data = bytes(self.tui.buf[self.pos :])
-        self.pos += len(data)
-        self.pending += self.decoder.decode(data)
-        ends = list(_FRAME_END.finditer(self.pending))
-        if not ends:
-            return
-        text, self.pending = self.pending[: ends[-1].end()], self.pending[ends[-1].end() :]
-        i, n = 0, len(text)
-        while i < n:
-            if text[i] == "\x1b":
-                end = _escape_end(text, i) or n
-                self._escape(text[i:end])
-                i = end
-                continue
-            self._char(text[i])
-            i += 1
-
-    def _blank(self) -> list[str]:
-        return [" "] * self.ncols
-
-    def _escape(self, seq: str) -> None:
-        if seq[1] == "7":
-            self.saved = (self.row, self.col)
-        elif seq[1] == "8":
-            self.row, self.col = self.saved
-        if seq[1] != "[":
-            return
-        final, params = seq[-1], seq[2:-1]
-        if params[:1] in ("?", ">", "<", "="):
-            return
-        nums = [int(p) if p.isdigit() else 0 for p in params.split(";")] if params else []
-
-        def arg(k: int, default: int) -> int:
-            return nums[k] if k < len(nums) and nums[k] > 0 else default
-
-        last_row, last_col = self.nrows - 1, self.ncols - 1
-        if final in "Hf":
-            self.row, self.col = min(last_row, arg(0, 1) - 1), min(last_col, arg(1, 1) - 1)
-        elif final == "A":
-            self.row = max(0, self.row - arg(0, 1))
-        elif final == "B":
-            self.row = min(last_row, self.row + arg(0, 1))
-        elif final == "C":
-            self.col = min(last_col, self.col + arg(0, 1))
-        elif final == "D":
-            self.col = max(0, self.col - arg(0, 1))
-        elif final == "G":
-            self.col = min(last_col, arg(0, 1) - 1)
-        elif final == "d":
-            self.row = min(last_row, arg(0, 1) - 1)
-        elif final == "K":
-            mode, line = (nums[0] if nums else 0), self.grid[self.row]
-            span = {0: range(min(self.col, self.ncols), self.ncols), 1: range(min(self.col + 1, self.ncols))}
-            for c in span.get(mode, range(self.ncols)):
-                line[c] = " "
-        elif final == "J":
-            mode = nums[0] if nums else 0
-            if mode == 0:
-                self.grid[self.row][min(self.col, self.ncols) :] = [" "] * (self.ncols - min(self.col, self.ncols))
-                cleared = range(self.row + 1, self.nrows)
-            elif mode == 1:
-                cleared = range(self.row)
-            else:
-                cleared = range(self.nrows)
-            for r in cleared:
-                self.grid[r] = self._blank()
-
-    def _newline(self) -> None:
-        self.row += 1
-        if self.row >= self.nrows:
-            self.grid.pop(0)
-            self.grid.append(self._blank())
-            self.row = self.nrows - 1
-
-    def _char(self, ch: str) -> None:
-        if ch == "\r":
-            self.col = 0
-        elif ch == "\n":
-            self._newline()
-        elif ch == "\b":
-            self.col = max(0, self.col - 1)
-        elif ch == "\t":
-            self.col = min(self.ncols - 1, (self.col // 8 + 1) * 8)
-        elif ord(ch) >= 0x20 and ord(ch) != 0x7F:
-            if self.col >= self.ncols:
-                self.col = 0
-                self._newline()
-            self.grid[self.row][self.col] = ch
-            self.col += 1
-
-
-def _escape_end(text: str, i: int) -> int | None:
-    """Where the escape sequence at text[i] ends, or None when it is not
-    whole: CSI up to its final byte, an OSC/DCS/APC/PM string up to BEL or
-    ST, a charset designation's three bytes, any other escape's two."""
-    n = len(text)
-    if i + 1 >= n:
-        return None
-    kind = text[i + 1]
-    if kind == "[":
-        j = i + 2
-        while j < n and 0x20 <= ord(text[j]) <= 0x3F:
-            j += 1
-        return None if j >= n else j + 1
-    if kind in "]P_^X":
-        j = i + 2
-        while j < n:
-            if text[j] == "\x07":
-                return j + 1
-            if text[j] == "\x1b":
-                if j + 1 >= n:
-                    return None
-                if text[j + 1] == "\\":
-                    return j + 2
-            j += 1
-        return None
-    if kind in "()*+#%":
-        return None if i + 2 >= n else i + 3
-    return i + 2
+        return self.tui.screen()
 
 
 # ------------------------------------------------------------------ helpers
@@ -483,7 +338,7 @@ def test_the_list_groups_regroups_cancels_and_closes(craze_bin: Path, fake_agent
         mark = b.mark()
         b.write(b"bravo third" + ENTER)
         b.wait_contains_since("ack: bravo third", mark, timeout=WAIT)
-        assert "ack: bravo second" not in _ANSI.sub("", b.screen()), sb.dump()
+        assert "ack: bravo second" not in b.history(), sb.dump()
         # That turn cancelled on bravo's own terminal (esc), and bravo idle
         # again for the close below: its row's last reply is the new turn's.
         b.write(ESC)

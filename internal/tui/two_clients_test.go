@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/control"
@@ -179,7 +179,7 @@ func TestAnAskAnsweredInOneClosesInTheOther(t *testing.T) {
 		a = pumpUntil(t, a, Model.cardOpen)
 		b = pumpUntil(t, b, Model.cardOpen)
 
-		for _, k := range []tea.KeyMsg{runeKey('1'), runeKey(' '), runeKey('3'), enter()} {
+		for _, k := range []tea.KeyPressMsg{runeKey('1'), runeKey(' '), runeKey('3'), enter()} {
 			a = pumpKey(t, a, k)
 		}
 		const one, many = "? Pick one → A", "? Pick any → X, Z"
@@ -260,7 +260,7 @@ func TestAnAnsweredAsksRowIsEveryClients(t *testing.T) {
 	h.stub.Emit(agent.Event{Type: agent.EventQuestion, Question: stubQuestion()})
 	a = pumpUntil(t, a, Model.cardOpen)
 	b = pumpUntil(t, b, Model.cardOpen)
-	for _, k := range []tea.KeyMsg{runeKey('2'), enter()} {
+	for _, k := range []tea.KeyPressMsg{runeKey('2'), enter()} {
 		a = pumpKey(t, a, k)
 	}
 	a = pumpUntil(t, a, closed(one, many))

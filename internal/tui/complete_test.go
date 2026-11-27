@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 )
 
 // The completion component (complete.go, plan 030 §3.15) driven directly:
@@ -239,9 +239,9 @@ func trimmed(lines []string) []string {
 }
 
 // popKey hands p one key.
-func popKey(p *completePopup, k tea.KeyMsg) (completeChoice, bool) { return p.key(k) }
+func popKey(p *completePopup, k tea.KeyPressMsg) (completeChoice, bool) { return p.key(k) }
 
-func keyOf(t tea.KeyType) tea.KeyMsg { return tea.KeyMsg{Type: t} }
+func keyOf(t string) tea.KeyPressMsg { return testKey(t) }
 
 // ---------------------------------------------------------- the @ grammar
 
@@ -415,7 +415,7 @@ func TestThePopupIsUpWhileTheCursorIsInAToken(t *testing.T) {
 	}
 	// A closed popup takes no key.
 	p.sync("plain text", 10, env)
-	if _, handled := popKey(&p, keyOf(tea.KeyDown)); handled {
+	if _, handled := popKey(&p, keyOf("down")); handled {
 		t.Fatal("a closed popup took ↓")
 	}
 	if p.height(40, 10) != 0 || p.view(Preset("dark"), 40, 10) != "" {
@@ -434,11 +434,11 @@ func TestTheKeysChooseCompleteAndAccept(t *testing.T) {
 
 	p := open()
 	steps := []struct {
-		key  tea.KeyMsg
+		key  tea.KeyPressMsg
 		want int
 	}{
-		{keyOf(tea.KeyDown), 1}, {keyOf(tea.KeyCtrlN), 2}, {keyOf(tea.KeyDown), 0}, // wraps
-		{keyOf(tea.KeyUp), 2}, {keyOf(tea.KeyCtrlP), 1}, {keyOf(tea.KeyUp), 0},
+		{keyOf("down"), 1}, {keyOf("ctrl+n"), 2}, {keyOf("down"), 0}, // wraps
+		{keyOf("up"), 2}, {keyOf("ctrl+p"), 1}, {keyOf("up"), 0},
 	}
 	for i, s := range steps {
 		if c, handled := popKey(&p, s.key); !handled || c.verb != 0 || p.sel != s.want {
@@ -446,9 +446,9 @@ func TestTheKeysChooseCompleteAndAccept(t *testing.T) {
 		}
 	}
 
-	for _, k := range []tea.KeyMsg{keyOf(tea.KeyTab), keyOf(tea.KeyEnter)} {
+	for _, k := range []tea.KeyPressMsg{keyOf("tab"), keyOf("enter")} {
 		p := open()
-		popKey(&p, keyOf(tea.KeyDown))
+		popKey(&p, keyOf("down"))
 		c, handled := popKey(&p, k)
 		if !handled || c.verb != completeAccepted || c.item.Name != "luna" || c.value != "@luna " || c.cursor != len("@luna ") {
 			t.Fatalf("%v: %+v, handled %v; want luna accepted as \"@luna \"", k, c, handled)
@@ -457,7 +457,7 @@ func TestTheKeysChooseCompleteAndAccept(t *testing.T) {
 
 	// Alt+enter is the composer's newline, and a rune is the input's.
 	p = open()
-	for _, k := range []tea.KeyMsg{{Type: tea.KeyEnter, Alt: true}, {Type: tea.KeyRunes, Runes: []rune("x")}, keyOf(tea.KeyLeft), keyOf(tea.KeyShiftTab)} {
+	for _, k := range []tea.KeyPressMsg{{Code: tea.KeyEnter, Mod: tea.ModAlt}, {Code: tea.KeyExtended, Text: "x"}, keyOf("left"), keyOf("shift+tab")} {
 		if _, handled := popKey(&p, k); handled {
 			t.Fatalf("the popup took %v", k)
 		}
@@ -470,12 +470,12 @@ func TestTheKeysChooseCompleteAndAccept(t *testing.T) {
 	if !p.visible() || len(p.ans.Items) != 0 {
 		t.Fatalf("@zzz: visible %v, items %v", p.visible(), popupNames(p))
 	}
-	for _, k := range []tea.KeyType{tea.KeyTab, tea.KeyDown, tea.KeyUp, tea.KeyCtrlN, tea.KeyCtrlP} {
+	for _, k := range []string{"tab", "down", "up", "ctrl+n", "ctrl+p"} {
 		if c, handled := popKey(&p, keyOf(k)); !handled || c.verb != 0 {
 			t.Fatalf("%v with nothing to choose: handled %v, verb %v", k, handled, c.verb)
 		}
 	}
-	if _, handled := popKey(&p, keyOf(tea.KeyEnter)); handled {
+	if _, handled := popKey(&p, keyOf("enter")); handled {
 		t.Fatal("enter with nothing to accept was the popup's")
 	}
 }
@@ -506,7 +506,7 @@ func TestAnAcceptReplacesOnlyItsToken(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			p := newCompletePopup(src, atGrammar)
 			p.sync(c.value, c.cursor, env)
-			ch, handled := popKey(&p, keyOf(tea.KeyEnter))
+			ch, handled := popKey(&p, keyOf("enter"))
 			if !handled || ch.verb != completeAccepted || ch.value != c.want || ch.cursor != c.wantCursor {
 				t.Fatalf("got %q at %d (handled %v, verb %v); want %q at %d", ch.value, ch.cursor, handled, ch.verb, c.want, c.wantCursor)
 			}
@@ -528,7 +528,7 @@ func TestEscHidesThePopupUntilTheTokenChanges(t *testing.T) {
 	env := completeEnv{Workspace: "/w"}
 	p := newCompletePopup(src, atGrammar)
 	synced(&p, "x @lu", env)
-	if c, handled := popKey(&p, keyOf(tea.KeyEsc)); !handled || c.verb != 0 || p.visible() {
+	if c, handled := popKey(&p, keyOf("esc")); !handled || c.verb != 0 || p.visible() {
 		t.Fatalf("esc: handled %v, verb %v, visible %v", handled, c.verb, p.visible())
 	}
 	// The same token — synced again, the cursor moved inside it, or left and
@@ -545,7 +545,7 @@ func TestEscHidesThePopupUntilTheTokenChanges(t *testing.T) {
 		t.Fatalf("after typing: visible %v, %v", p.visible(), popupNames(p))
 	}
 	// Hidden again, then another token elsewhere opens it.
-	popKey(&p, keyOf(tea.KeyEsc))
+	popKey(&p, keyOf("esc"))
 	synced(&p, "x @lum @l", env)
 	if !p.visible() {
 		t.Fatal("another token did not open the popup")
@@ -561,7 +561,7 @@ func TestEscHidesOnlyInTheEnvironmentItWasPressedIn(t *testing.T) {
 	a := completeEnv{Workspace: "/w", Shown: 1}
 	p := newCompletePopup(src, atGrammar)
 	synced(&p, "@lu", a)
-	popKey(&p, keyOf(tea.KeyEsc))
+	popKey(&p, keyOf("esc"))
 	if synced(&p, "@lu", a); p.visible() {
 		t.Fatal("fixture: the dismissed token came back in its own session")
 	}
@@ -572,7 +572,7 @@ func TestEscHidesOnlyInTheEnvironmentItWasPressedIn(t *testing.T) {
 	}
 	// Dismissed there, it stays dismissed there — through a sync with no
 	// token under the cursor, too.
-	popKey(&p, keyOf(tea.KeyEsc))
+	popKey(&p, keyOf("esc"))
 	for _, cur := range []int{0, 3} {
 		if p.sync("@lu", cur, b); p.visible() {
 			t.Fatalf("the token dismissed in the second session came back with the cursor at %d", cur)
@@ -617,7 +617,7 @@ func TestTabDescendsIntoADirectoryAndStaysOpen(t *testing.T) {
 
 	p := newCompletePopup(src, atGrammar)
 	p.sync("fix @ now", 5, env)
-	c, handled := popKey(&p, keyOf(tea.KeyTab))
+	c, handled := popKey(&p, keyOf("tab"))
 	if !handled || c.verb != completeDescended || c.value != "fix @~/projects/ now" || c.cursor != len("fix @~/projects/") {
 		t.Fatalf("tab on projects/: %q at %d (verb %v)", c.value, c.cursor, c.verb)
 	}
@@ -629,7 +629,7 @@ func TestTabDescendsIntoADirectoryAndStaysOpen(t *testing.T) {
 	// Enter on the same row accepts it: its text and a space.
 	p = newCompletePopup(src, atGrammar)
 	p.sync("@", 1, env)
-	if c, _ := popKey(&p, keyOf(tea.KeyEnter)); c.verb != completeAccepted || c.value != "@~/projects " {
+	if c, _ := popKey(&p, keyOf("enter")); c.verb != completeAccepted || c.value != "@~/projects " {
 		t.Fatalf("enter on projects/: %q (verb %v)", c.value, c.verb)
 	}
 
@@ -637,8 +637,8 @@ func TestTabDescendsIntoADirectoryAndStaysOpen(t *testing.T) {
 	// the token.
 	p = newCompletePopup(src, atGrammar)
 	p.sync("@", 1, env)
-	popKey(&p, keyOf(tea.KeyDown))
-	c, _ = popKey(&p, keyOf(tea.KeyTab))
+	popKey(&p, keyOf("down"))
+	c, _ = popKey(&p, keyOf("tab"))
 	if c.verb != completeDescended || c.value != `@"~/my dir/"` || c.cursor != len(`@"~/my dir/`) {
 		t.Fatalf("tab on my dir/: %q at %d (verb %v)", c.value, c.cursor, c.verb)
 	}
@@ -651,8 +651,8 @@ func TestTabDescendsIntoADirectoryAndStaysOpen(t *testing.T) {
 	// Descend is written as the source gave it.
 	p = newCompletePopup(src, atGrammar)
 	p.sync("@", 1, env)
-	popKey(&p, keyOf(tea.KeyUp))
-	if c, _ := popKey(&p, keyOf(tea.KeyTab)); c.value != "@~/src/" {
+	popKey(&p, keyOf("up"))
+	if c, _ := popKey(&p, keyOf("tab")); c.value != "@~/src/" {
 		t.Fatalf("tab on src/: %q", c.value)
 	}
 }
@@ -662,8 +662,8 @@ func TestTheSelectionHoldsItsCandidateAcrossARefresh(t *testing.T) {
 	env := completeEnv{Workspace: "/w"}
 	p := newCompletePopup(src, atGrammar)
 	synced(&p, "@lu", env)
-	popKey(&p, keyOf(tea.KeyDown))
-	popKey(&p, keyOf(tea.KeyDown))
+	popKey(&p, keyOf("down"))
+	popKey(&p, keyOf("down"))
 	if it, _ := p.selected(); it.Name != "lux" {
 		t.Fatalf("selected %q", it.Name)
 	}
@@ -805,18 +805,18 @@ func TestTheWindowShowsEightRowsAndCountsTheRest(t *testing.T) {
 
 	check("at the top", 20, append(rowsOf(0, 0, 8), "  ↓ 12 more"))
 	for range 7 {
-		popKey(&p, keyOf(tea.KeyDown))
+		popKey(&p, keyOf("down"))
 	}
 	check("the eighth row", 20, append(rowsOf(7, 0, 8), "  ↓ 12 more"))
-	popKey(&p, keyOf(tea.KeyDown))
+	popKey(&p, keyOf("down"))
 	check("scrolled one", 20, append(rowsOf(8, 1, 9), "  ↓ 11 more"))
 	// Up from the top wraps to the last, where the count says what is above.
 	for range 9 {
-		popKey(&p, keyOf(tea.KeyUp))
+		popKey(&p, keyOf("up"))
 	}
 	check("wrapped to the last", 20, append(rowsOf(19, 12, 20), "  ↑ 12 more"))
 	// Back up inside the window: it does not move.
-	popKey(&p, keyOf(tea.KeyUp))
+	popKey(&p, keyOf("up"))
 	check("up inside the window", 20, append(rowsOf(18, 12, 20), "  ↑ 12 more"))
 
 	// Given fewer rows: the window narrows around the selection, the count
@@ -860,14 +860,14 @@ func TestTheCountLineCountsWhatTheSourceLeftOut(t *testing.T) {
 	p := newCompletePopup(moreSource{items: named("a", "b", "c"), more: 5}, atGrammar)
 	synced(&p, "@", completeEnv{})
 	check("three handed, five left out", p, 20, []string{"❯ a", "  b", "  c", "  ↓ 5 more"})
-	popKey(&p, keyOf(tea.KeyUp))
+	popKey(&p, keyOf("up"))
 	check("at the last handed", p, 20, []string{"  a", "  b", "❯ c", "  ↓ 5 more"})
 	check("squeezed to two rows", p, 2, []string{"❯ c", "  ↓ 5 more"})
 
 	p = newCompletePopup(moreSource{items: numbered(12), more: 30}, atGrammar)
 	synced(&p, "@", completeEnv{})
 	for range 11 {
-		popKey(&p, keyOf(tea.KeyDown))
+		popKey(&p, keyOf("down"))
 	}
 	if got := trimmed(popupText(p, 40, 20)); got[len(got)-1] != "  ↓ 30 more" {
 		t.Fatalf("at the last of twelve handed: %q", got[len(got)-1])
@@ -929,7 +929,7 @@ func TestALoadRunsOnceAndServesEveryQueryThatNamesIt(t *testing.T) {
 		t.Fatalf("@~/ offers %v", got)
 	}
 	// Tab on projects/ descends, naming another load.
-	c, _ := popKey(&p, keyOf(tea.KeyTab))
+	c, _ := popKey(&p, keyOf("tab"))
 	if c.value != "@~/projects/" {
 		t.Fatalf("descended into %q", c.value)
 	}
@@ -983,7 +983,7 @@ func TestALoadNoLongerAwaitedIsCancelledAndItsResultDropped(t *testing.T) {
 	}{
 		{"the popup closed", func(t *testing.T, p *completePopup, _ *treeSource) { p.close() }, false},
 		{"esc hid it", func(t *testing.T, p *completePopup, _ *treeSource) {
-			if _, handled := popKey(p, keyOf(tea.KeyEsc)); !handled {
+			if _, handled := popKey(p, keyOf("esc")); !handled {
 				t.Fatal("esc was not the popup's")
 			}
 		}, false},
@@ -1147,11 +1147,11 @@ func TestASwitchLeavesALoadsResultBehind(t *testing.T) {
 	if handled {
 		t.Fatal("the gate applied a result a switch left behind")
 	}
-	key := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")}
+	key := textKey("x")
 	m.held = []heldMsg{{msg: msg, bytes: 1}, {msg: key, bytes: 1}}
 	m.heldBytes = 2
 	m.dropStaleHeld()
-	if _, ok := m.held[0].msg.(tea.KeyMsg); len(m.held) != 1 || !ok || m.heldBytes != 1 {
+	if _, ok := m.held[0].msg.(tea.KeyPressMsg); len(m.held) != 1 || !ok || m.heldBytes != 1 {
 		t.Fatalf("held after a switch: %+v", m.held)
 	}
 }
@@ -1229,7 +1229,7 @@ func TestADeletedTokenTakesItsDismissalWithIt(t *testing.T) {
 	env := completeEnv{Workspace: "/w"}
 	p := newCompletePopup(src, atGrammar)
 	synced(&p, "@foo", env)
-	popKey(&p, keyOf(tea.KeyEsc))
+	popKey(&p, keyOf("esc"))
 	// The cursor leaves the token, the token still there: hidden, and hidden
 	// again once the cursor is back in it.
 	p.sync("@foo bar", len("@foo bar"), env)
@@ -1243,7 +1243,7 @@ func TestADeletedTokenTakesItsDismissalWithIt(t *testing.T) {
 	}
 	// Moved, not deleted — the same text at another place — is another token
 	// too.
-	popKey(&p, keyOf(tea.KeyEsc))
+	popKey(&p, keyOf("esc"))
 	p.sync("x @foo", 0, env)
 	if synced(&p, "x @foo", env); !p.visible() {
 		t.Fatal("the token moved to another place stayed hidden")

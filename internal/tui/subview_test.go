@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/transcript"
@@ -17,7 +17,7 @@ import (
 func openView(t *testing.T, m Model) Model {
 	t.Helper()
 	m.input.SetValue("")
-	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	tm, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 	m = tm.(Model)
 	tm, _ = m.Update(enter())
 	m = tm.(Model)
@@ -73,7 +73,7 @@ func TestEscAndLeftReturnAndRestoreOffset(t *testing.T) {
 	}
 	m.refreshViewport()
 	for i := 0; i < 2; i++ {
-		tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyPgUp})
+		tm, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyPgUp})
 		m = tm.(Model)
 	}
 	if m.vp.AtBottom() || m.vp.YOffset == 0 {
@@ -90,7 +90,7 @@ func TestEscAndLeftReturnAndRestoreOffset(t *testing.T) {
 		t.Fatal("setup: the child should open at its own bottom")
 	}
 
-	tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	tm, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
 	m = tm.(Model)
 	if m.viewing != "" {
 		t.Fatal("esc should return")
@@ -103,7 +103,7 @@ func TestEscAndLeftReturnAndRestoreOffset(t *testing.T) {
 	}
 
 	m = openView(t, m)
-	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	tm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyLeft})
 	m = tm.(Model)
 	if m.viewing != "" {
 		t.Fatal("left should return")
@@ -119,14 +119,14 @@ func TestEscAndLeftReturnAndRestoreOffset(t *testing.T) {
 	// re-entered, it is where it was.
 	m = openView(t, m)
 	for i := 0; i < 2; i++ {
-		tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyPgUp})
+		tm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyPgUp})
 		m = tm.(Model)
 	}
 	childOff := m.vp.YOffset
 	if childOff == 0 || m.vp.AtBottom() {
 		t.Fatalf("setup: the child should be scrolled mid-way, offset %d", childOff)
 	}
-	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	tm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
 	m = tm.(Model)
 	m = openView(t, m)
 	if m.vp.YOffset != childOff {
@@ -145,20 +145,20 @@ func TestMouseAndPagingInsideTheView(t *testing.T) {
 	if bottom < 3*wheelLines {
 		t.Fatalf("setup: not enough child scrollback, offset %d", bottom)
 	}
-	m = wheel(t, m, tea.MouseButtonWheelUp)
+	m = wheel(t, m, tea.MouseWheelUp)
 	if got := m.vp.YOffset; got != bottom-wheelLines {
 		t.Fatalf("wheel up inside the view moved to %d, want %d", got, bottom-wheelLines)
 	}
-	m = wheel(t, m, tea.MouseButtonWheelDown)
+	m = wheel(t, m, tea.MouseWheelDown)
 	if got := m.vp.YOffset; got != bottom {
 		t.Fatalf("wheel down inside the view moved to %d, want %d", got, bottom)
 	}
-	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyPgUp})
+	tm, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyPgUp})
 	m = tm.(Model)
 	if got := m.vp.YOffset; got >= bottom {
 		t.Fatalf("pgup inside the view did not page: %d", got)
 	}
-	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+	tm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyPgDown})
 	m = tm.(Model)
 	if got := m.vp.YOffset; got != bottom {
 		t.Fatalf("pgdn inside the view moved to %d, want %d", got, bottom)
@@ -215,7 +215,7 @@ func TestArrowsScrollInsideTheView(t *testing.T) {
 		t.Fatal("setup should stick to the bottom")
 	}
 	bottom := m.vp.YOffset
-	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	tm, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyUp})
 	m = tm.(Model)
 	if m.viewing == "" {
 		t.Fatal("up must not leave the view")
@@ -223,7 +223,7 @@ func TestArrowsScrollInsideTheView(t *testing.T) {
 	if m.vp.YOffset != bottom-1 {
 		t.Fatalf("up scrolled to %d, want %d", m.vp.YOffset, bottom-1)
 	}
-	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	tm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 	m = tm.(Model)
 	if m.vp.YOffset != bottom {
 		t.Fatalf("down scrolled to %d, want %d", m.vp.YOffset, bottom)
@@ -240,7 +240,7 @@ func TestTabSwitchDoesNotCycleMode(t *testing.T) {
 	mode := m.snap.CurrentMode
 	m = openView(t, m)
 	first := m.viewing
-	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	tm, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
 	m = tm.(Model)
 	if m.viewing == "" || m.viewing == first {
 		t.Fatalf("tab should switch, viewing %q", m.viewing)
@@ -248,7 +248,7 @@ func TestTabSwitchDoesNotCycleMode(t *testing.T) {
 	if m.snap.CurrentMode != mode {
 		t.Fatalf("tab cycled the mode to %q", m.snap.CurrentMode)
 	}
-	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+	tm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
 	m = tm.(Model)
 	if m.viewing != first {
 		t.Fatalf("shift+tab should wrap back, viewing %q", m.viewing)
@@ -270,7 +270,7 @@ func TestKeysPasteAndSlashInertInsideTheView(t *testing.T) {
 	if m.input.Value() != "draft" {
 		t.Fatalf("entering should keep the draft: %q", m.input.Value())
 	}
-	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	tm, _ := m.Update(runeKey('x'))
 	m = tm.(Model)
 	if m.input.Value() != "draft" {
 		t.Fatalf("typing reached the composer: %q", m.input.Value())
@@ -283,7 +283,7 @@ func TestKeysPasteAndSlashInertInsideTheView(t *testing.T) {
 	if m.viewing == "" {
 		t.Fatal("enter must be a no-op")
 	}
-	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	tm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyRight})
 	m = tm.(Model)
 	if m.viewing == "" {
 		t.Fatal("right must be a no-op")
@@ -329,7 +329,7 @@ func TestParentEventsWhileViewingDoNotMoveChildViewport(t *testing.T) {
 		tr.appendEntry(entry{kind: entryAssistant, text: fmt.Sprintf("child line %02d padding", i)}, now)
 	}
 	m.setViewportContent(true)
-	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	tm, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyUp})
 	m = tm.(Model)
 	offset := m.vp.YOffset
 	if m.vp.AtBottom() {
@@ -481,7 +481,7 @@ func TestEvictionWhileViewedKeepsTombstoneUntilEsc(t *testing.T) {
 	if m.subs["task-1"] == nil {
 		t.Fatal("the viewed transcript must stay")
 	}
-	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	tm, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
 	m = tm.(Model)
 	if m.viewing != "" {
 		t.Fatal("esc releases the tombstone")
@@ -627,7 +627,7 @@ func TestResizeWhileScrolledInsideTheView(t *testing.T) {
 		tr.appendEntry(entry{kind: entryAssistant, text: fmt.Sprintf("child line %02d padding", i)}, now)
 	}
 	m.setViewportContent(true)
-	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyPgUp})
+	tm, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyPgUp})
 	m = tm.(Model)
 	if m.vp.AtBottom() {
 		t.Fatal("setup: should be scrolled up")
@@ -665,7 +665,7 @@ func TestLayoutComputedOncePerUpdateInsideTheView(t *testing.T) {
 	m = openView(t, m)
 	for _, msg := range []tea.Msg{
 		tea.WindowSizeMsg{Width: 100, Height: 30},
-		tea.KeyMsg{Type: tea.KeyUp},
+		tea.KeyPressMsg{Code: tea.KeyUp},
 		refreshSnapMsg{},
 	} {
 		before := m.layouts

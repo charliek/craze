@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/charliek/craze/internal/agent"
 )
@@ -244,7 +244,7 @@ func TestShellBareBangRunsNothing(t *testing.T) {
 func TestShellCtrlLIsRefused(t *testing.T) {
 	m, stub := queueWorking(t)
 	m.input.SetValue("!echo hi")
-	tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlL})
+	tm, cmd := m.Update(tea.KeyPressMsg{Code: 'l', Mod: tea.ModCtrl})
 	m = tm.(Model)
 	if got := runCmd(cmd); got != nil {
 		t.Fatalf("ctrl+l in shell mode returned %T", got)
@@ -271,7 +271,7 @@ func TestShellCtrlLIsRefused(t *testing.T) {
 func TestShellQueueEditorEnterSavesAndRunsNothing(t *testing.T) {
 	m, _ := queueWorking(t)
 	m = typeEnter(t, m, "the original row")
-	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	tm, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyUp})
 	m = tm.(Model)
 	tm, _ = m.Update(enter())
 	m = tm.(Model)
@@ -324,7 +324,7 @@ func TestShellCtrlCKillsOnlyTheCommand(t *testing.T) {
 	stub := stubOf(t, m)
 	m, marker, done := runningShell(t, m)
 
-	tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	tm, cmd := m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
 	m = tm.(Model)
 	if got := runCmd(cmd); got != nil {
 		t.Fatalf("ctrl+c on a running command returned %T", got)
@@ -364,7 +364,7 @@ func TestShellEscKillsFromTheFirstRung(t *testing.T) {
 	stub := stubOf(t, m)
 	m, marker, done := runningShell(t, m)
 
-	tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	tm, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
 	m = tm.(Model)
 	if got := runCmd(cmd); got != nil {
 		t.Fatalf("esc on a running command returned %T", got)
@@ -386,12 +386,12 @@ func TestShellEscKillsFromTheFirstRung(t *testing.T) {
 func TestShellEscUnderALayerKeepsItsEarlierMeaning(t *testing.T) {
 	t.Run("a dialog", func(t *testing.T) {
 		m, marker, done := runningShell(t, sized(t))
-		tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlG})
+		tm, _ := m.Update(tea.KeyPressMsg{Code: 'g', Mod: tea.ModCtrl})
 		m = tm.(Model)
 		if m.dialog != dialogTheme {
 			t.Fatal("setup: no theme picker")
 		}
-		tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+		tm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
 		m = tm.(Model)
 		if m.dialog != dialogNone {
 			t.Fatal("esc must still close the dialog")
@@ -400,7 +400,7 @@ func TestShellEscUnderALayerKeepsItsEarlierMeaning(t *testing.T) {
 			t.Fatal("esc on a dialog killed the command")
 		}
 		// Ctrl+C is the way out from under a layer.
-		tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+		tm, _ = m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
 		m = tm.(Model)
 		if !waitMarker(t, marker, false, 15*time.Second) {
 			t.Fatal("ctrl+c did not kill the command")
@@ -423,7 +423,7 @@ func TestShellEscUnderALayerKeepsItsEarlierMeaning(t *testing.T) {
 		if !m.cardOpen() {
 			t.Fatal("setup: no card")
 		}
-		tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+		tm, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
 		m = tm.(Model)
 		if m.cardOpen() {
 			t.Fatal("esc must still skip the question")
@@ -431,7 +431,7 @@ func TestShellEscUnderALayerKeepsItsEarlierMeaning(t *testing.T) {
 		if !markerAlive(t, marker) {
 			t.Fatal("esc on a card killed the command")
 		}
-		tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+		tm, _ = m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
 		m = tm.(Model)
 		if !waitMarker(t, marker, false, 15*time.Second) {
 			t.Fatal("ctrl+c did not kill the command from under a card")
@@ -447,7 +447,7 @@ func TestShellEscClearsTheDraftAndNeverCancelsTheTurn(t *testing.T) {
 	m := hangWorking(t)
 	stub := stubOf(t, m)
 	m.input.SetValue("!rm -rf nothing")
-	tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	tm, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
 	m = tm.(Model)
 	if got := runCmd(cmd); got != nil {
 		t.Fatalf("esc in shell mode returned %T", got)
@@ -462,7 +462,7 @@ func TestShellEscClearsTheDraftAndNeverCancelsTheTurn(t *testing.T) {
 		t.Fatalf("esc in shell mode cancelled the turn: %d cancels", n)
 	}
 	// The mode is gone with the draft, so the next Esc is the turn's again.
-	tm, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	tm, cmd = m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
 	m = tm.(Model)
 	runCmd(cmd)
 	if n := stub.CancelsSent(); n != 1 {
@@ -475,7 +475,7 @@ func TestShellEscClearsTheDraftAndNeverCancelsTheTurn(t *testing.T) {
 func TestShellEveryQuitPathKillsTheCommand(t *testing.T) {
 	t.Run("ctrl+d", func(t *testing.T) {
 		m, marker, done := runningShell(t, sized(t))
-		tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlD})
+		tm, cmd := m.Update(tea.KeyPressMsg{Code: 'd', Mod: tea.ModCtrl})
 		m = tm.(Model)
 		if !m.quitting {
 			t.Fatal("ctrl+d must quit")
@@ -543,13 +543,13 @@ func TestShellEveryQuitPathKillsTheCommand(t *testing.T) {
 		base := time.Date(2026, 9, 20, 10, 0, 0, 0, time.UTC)
 		m := hangWorking(t)
 		m.clock = func() time.Time { return base }
-		tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+		tm, _ := m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
 		m = tm.(Model)
 		if m.ctrlCDeadline.IsZero() {
 			t.Fatal("setup: the first press should arm the window")
 		}
 		m, marker, done := runningShell(t, m)
-		tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+		tm, cmd := m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
 		m = tm.(Model)
 		if m.quitting {
 			t.Fatal("a press inside the window quit with a command running")
@@ -705,14 +705,14 @@ func TestShellRunningKeepsTheSpinnerTicking(t *testing.T) {
 func TestShellModeDoesNotColourTheSubAgentView(t *testing.T) {
 	m := sized(t)
 	m.input.SetValue("!ls")
-	if !strings.Contains(m.composerRule(false), ansiFG(m.theme.Shell.TrueColor)) {
+	if !strings.Contains(m.composerRule(false), ansiFG(depthHex(m.theme.Shell))) {
 		t.Fatal("setup: the composer's own rule is not in the shell colour")
 	}
 	m.viewing = "task-a"
-	if strings.Contains(m.composerRule(false), ansiFG(m.theme.Shell.TrueColor)) {
+	if strings.Contains(m.composerRule(false), ansiFG(depthHex(m.theme.Shell))) {
 		t.Fatal("the sub-agent view's rule took the shell colour")
 	}
-	if !strings.Contains(m.composerRule(false), ansiFG(m.theme.Rule.TrueColor)) {
+	if !strings.Contains(m.composerRule(false), ansiFG(depthHex(m.theme.Rule))) {
 		t.Fatal("the sub-agent view's rule is not the ordinary one")
 	}
 }

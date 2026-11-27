@@ -13,9 +13,7 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
-	"github.com/muesli/termenv"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/chatgptauth"
@@ -67,7 +65,7 @@ func TestWiredFakeAgentStreamFollowUpQuit(t *testing.T) {
 	m = pumpUntil(t, m, allOf(isIdle, viewHas("second reply")))
 	m = pumpSettled(t, m)
 
-	tm, qcmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlD})
+	tm, qcmd := m.Update(tea.KeyPressMsg{Code: 'd', Mod: tea.ModCtrl})
 	m = tm.(Model)
 	if !m.quitting || qcmd == nil {
 		t.Fatal("expected quit")
@@ -117,7 +115,7 @@ func TestWiredQuitWhileWorkingReapsChild(t *testing.T) {
 		t.Fatal("expected a working prompt")
 	}
 
-	tm, qcmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlD})
+	tm, qcmd := m.Update(tea.KeyPressMsg{Code: 'd', Mod: tea.ModCtrl})
 	m = tm.(Model)
 	if !m.quitting || qcmd == nil {
 		t.Fatal("expected quit")
@@ -267,10 +265,7 @@ func TestWiredModelChangeGoesThroughTheModelOption(t *testing.T) {
 }
 
 // TestMain records the environment before any test rewrites HOME, so the one
-// fake-agent build below keeps the developer's warm build cache. It also forces
-// a true-colour profile: `go test` has no TTY, so lipgloss would otherwise
-// render every theme as no colour at all and the raw-ANSI assertions in
-// theme_test.go would pass against an empty palette. And it installs the
+// fake-agent build below keeps the developer's warm build cache. It also installs the
 // parity watch (parity_test.go), so every fold of every test in the package is
 // held against a model folded from the same events (plan 024 A11); a broken
 // rule fails the test that broke it, and the run.
@@ -325,7 +320,6 @@ func TestMain(m *testing.M) {
 	// (plan 037). Set before any test runs, and never again.
 	gitBoundary = ownTempRoot(filepath.Clean(os.TempDir()))
 	pristineEnv = os.Environ()
-	lipgloss.SetColorProfile(termenv.TrueColor)
 	installParityWatch()
 	installPaintWatch()
 	gateSyncDefault = true

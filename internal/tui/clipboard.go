@@ -10,9 +10,9 @@ import (
 	"time"
 	"unicode/utf8"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/atotto/clipboard"
 	"github.com/aymanbagabas/go-osc52/v2"
-	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/charliek/craze/internal/harness/tool/attach"
 )

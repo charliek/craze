@@ -3,9 +3,8 @@ package tui
 import (
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
-	"github.com/charmbracelet/x/ansi"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 )
 
 // viewport is the transcript band's window onto the drawn rows (plan 032 §3.3
@@ -17,8 +16,8 @@ import (
 // rendered (physicalLines) — so a row is one line here as it was there.
 //
 // It has every call craze made of bubbles' viewport, with bubbles' clamps, and
-// View is bubbles' own lipgloss call; TestViewportMatchesBubbles drives the two
-// through the same operations and compares them. What bubbles has and craze
+// TestViewportMatchesJoinedRows checks it against the same operations on a
+// fully rebuilt transcript. What bubbles has and craze
 // never reached is left out: horizontal scrolling (nothing set a step or an
 // offset), the mouse wheel and the half-page and line keys inside Update
 // (craze scrolls on the wheel itself, and the keymap it gave bubbles bound
@@ -112,7 +111,7 @@ func (v *viewport) GotoBottom() { v.SetYOffset(v.maxYOffset()) }
 // Update is the page keymap craze gave bubbles' viewport: PgDn and PgUp, with
 // no modifier.
 func (v viewport) Update(msg tea.Msg) (viewport, tea.Cmd) {
-	if k, ok := msg.(tea.KeyMsg); ok {
+	if k, ok := msg.(tea.KeyPressMsg); ok {
 		switch k.String() {
 		case "pgdown":
 			v.PageDown()
@@ -147,7 +146,7 @@ func (v viewport) View() string {
 // measured with the tab as no cells at all. bubbles cut every line on screen
 // to the width once its scan found a wider one anywhere; cutting each line
 // here comes to the same thing without the scan, because the cut leaves a
-// line that fits exactly as it was (ansi.Truncate returns it whole). A line no
+// line that fits exactly as it was (truncateCells returns it whole). A line no
 // longer in bytes than the width fits without being measured: no grapheme is
 // wider in cells than it is long in bytes.
 func (v viewport) visibleLines() []string {
@@ -166,7 +165,7 @@ func (v viewport) visibleLines() []string {
 	}
 	for i, ln := range lines {
 		if len(ln) > v.Width {
-			lines[i] = ansi.Cut(ln, 0, v.Width)
+			lines[i] = truncateCells(ln, v.Width, "")
 		}
 	}
 	return lines

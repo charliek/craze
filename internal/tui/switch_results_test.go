@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/backend"
@@ -132,7 +132,7 @@ func TestAPasteNeverCrossesASwitch(t *testing.T) {
 		r.t.Helper()
 		rec := captureCopies(r.t)
 		_ = rec.write(pasted)
-		r.send(tea.KeyMsg{Type: tea.KeyCtrlV})
+		r.send(tea.KeyPressMsg{Code: 'v', Mod: tea.ModCtrl})
 		return r.take(&r.pastes, "A's paste")
 	}
 	answered := func(t *testing.T, paste tea.Cmd) tea.Msg {
@@ -214,7 +214,7 @@ func TestACopyNoteNeverCrossesASwitch(t *testing.T) {
 	rec := captureCopies(t)
 	r.stream(a, backend.Item{Kind: backend.ItemEvent, Gen: 1,
 		Event: seqd(1, agent.Event{Type: agent.EventText, Text: "a's reply"})[0]})
-	r.send(tea.KeyMsg{Type: tea.KeyCtrlY})
+	r.send(tea.KeyPressMsg{Code: 'y', Mod: tea.ModCtrl})
 	cp := r.take(&r.copies, "A's copy")
 	r.switchTo(b, laneRow(b, "session b", time.Minute))
 	r.up(b)
@@ -284,7 +284,7 @@ func TestWorkAskedBeforeTheFirstAdoptionIsThatSessions(t *testing.T) {
 		rec := captureCopies(r.t)
 		if kind == "a paste" {
 			_ = rec.write(pasted)
-			r.send(tea.KeyMsg{Type: tea.KeyCtrlV})
+			r.send(tea.KeyPressMsg{Code: 'v', Mod: tea.ModCtrl})
 			return r.take(&r.pastes, "the startup paste")
 		}
 		typeRunes(r, "/rename early")
@@ -457,14 +457,14 @@ func TestTheFirstAsMessagesAreDroppedBackOnA(t *testing.T) {
 			case "a paste":
 				rec := captureCopies(t)
 				_ = rec.write("from a's clipboard")
-				r.send(tea.KeyMsg{Type: tea.KeyCtrlV})
+				r.send(tea.KeyPressMsg{Code: 'v', Mod: tea.ModCtrl})
 				paste := r.take(&r.pastes, "A's paste")
 				original = func() tea.Msg { return runWatched(t, paste) }
 			case "a copy's note":
 				captureCopies(t)
 				r.stream(a, backend.Item{Kind: backend.ItemEvent, Gen: 1,
 					Event: seqd(1, agent.Event{Type: agent.EventText, Text: "a's reply"})[0]})
-				r.send(tea.KeyMsg{Type: tea.KeyCtrlY})
+				r.send(tea.KeyPressMsg{Code: 'y', Mod: tea.ModCtrl})
 				cp := r.take(&r.copies, "A's copy")
 				original = func() tea.Msg { return runWatched(t, cp) }
 			}
@@ -575,7 +575,7 @@ func TestTheBandNamesTheSessionAsItsRowDoes(t *testing.T) {
 		if got := rowTitle(r, runKey("a")); got != "alpha one" {
 			t.Fatalf("A's row reads %q", got)
 		}
-		r.send(tea.KeyMsg{Type: tea.KeyEsc})
+		r.send(tea.KeyPressMsg{Code: tea.KeyEsc})
 		if got := band(r); !strings.HasPrefix(got, "─ alpha one · ") {
 			t.Fatalf("back on A the band reads %q", got)
 		}

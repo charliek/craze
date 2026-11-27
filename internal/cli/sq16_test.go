@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/charliek/craze/internal/agent"
@@ -568,7 +568,7 @@ func TestThePickerRefusesARowThatLeftTheIndex(t *testing.T) {
 	evictRow(t, "s-legacy")
 	m, cmd := m.Update(enterKey)
 	m = feed(m, runCmd(t, cmd, 5*time.Second))
-	if view := ansi.Strip(m.View()); !strings.Contains(view, "the session index changed — try again") {
+	if view := ansi.Strip(m.View().Content); !strings.Contains(view, "the session index changed — try again") {
 		t.Fatalf("the picker does not show the refusal:\n%s", view)
 	}
 	if len(*loaded) != 0 {
@@ -639,7 +639,7 @@ func feed(m tea.Model, msgs []tea.Msg) tea.Model {
 	return m
 }
 
-var enterKey = tea.KeyMsg{Type: tea.KeyEnter}
+var enterKey = tea.KeyPressMsg{Code: tea.KeyEnter}
 
 // TestThePickerRefusesAnOpenSession: Enter on a row another craze holds
 // builds nothing; the picker stays up with an error row naming the holder,
@@ -661,7 +661,7 @@ func TestThePickerRefusesAnOpenSession(t *testing.T) {
 	m, loaded := pickerModel(t, rows, claims.pickerClaim)
 	m, cmd := m.Update(enterKey)
 	m = feed(m, runCmd(t, cmd, 5*time.Second))
-	view := ansi.Strip(m.View())
+	view := ansi.Strip(m.View().Content)
 	want := "that session is already running (pid " + strconv.Itoa(os.Getpid()) + ")"
 	if !strings.Contains(view, want) || !strings.Contains(view, "open elsewhere") {
 		t.Fatalf("the picker does not show the refusal %q:\n%s", want, view)
@@ -669,8 +669,8 @@ func TestThePickerRefusesAnOpenSession(t *testing.T) {
 	if len(*loaded) != 0 {
 		t.Fatalf("a refused row was built: %+v", *loaded)
 	}
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
-	if view := ansi.Strip(m.View()); strings.Contains(view, "already running (pid") {
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	if view := ansi.Strip(m.View().Content); strings.Contains(view, "already running (pid") {
 		t.Fatalf("moving the cursor kept the error row:\n%s", view)
 	}
 	// Our own run never took the refused session's lock.
@@ -711,7 +711,7 @@ func TestThePickerRefusalNamesTheAttach(t *testing.T) {
 			m, loaded := pickerModel(t, rows, claims.pickerClaim)
 			m, cmd := m.Update(enterKey)
 			m = feed(m, runCmd(t, cmd, 5*time.Second))
-			view := ansi.Strip(m.View())
+			view := ansi.Strip(m.View().Content)
 			if !strings.Contains(view, refused) || !strings.Contains(view, strings.TrimPrefix(hint, " — ")) {
 				t.Fatalf("the picker does not show %q and %q:\n%s", refused, hint, view)
 			}
@@ -759,7 +759,7 @@ func TestThePickerNeverBlocksOnABusyIndex(t *testing.T) {
 		t.Fatalf("the claim answered after %s; its bound is %s", took, bound)
 	}
 	m = feed(m, msgs)
-	if view := ansi.Strip(m.View()); !strings.Contains(view, "the session index is busy — try again") {
+	if view := ansi.Strip(m.View().Content); !strings.Contains(view, "the session index is busy — try again") {
 		t.Fatalf("the picker does not say the index is busy:\n%s", view)
 	}
 	if len(*loaded) != 0 {

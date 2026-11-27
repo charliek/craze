@@ -8,9 +8,9 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/charmbracelet/bubbles/textinput"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/backend"
@@ -709,29 +709,29 @@ func modelDialogFocuses(tabs []modelTab) []dialogFocus {
 	return out
 }
 
-func (m Model) handleModelDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) handleModelDialogKey(msg keyInput) (tea.Model, tea.Cmd) {
 	// The keys act on the tabs as they are now, and on a dialog repaired to
 	// match them, so no key can land on an option the catalog has dropped.
 	tabs := m.modelDialogTabs()
 	m.mdlg = m.mdlg.repaired(tabs)
-	switch msg.Type {
-	case tea.KeyEsc:
+	switch shortcut(msg) {
+	case "esc":
 		return m.closeDialog(true), nil
-	case tea.KeyEnter:
+	case "enter":
 		return m.applyModelDialog()
-	case tea.KeyTab:
+	case "tab":
 		m.mdlg.focus = cycleFocus(modelDialogFocuses(tabs), m.mdlg.focus, 1)
 		return m, nil
-	case tea.KeyShiftTab:
+	case "shift+tab":
 		m.mdlg.focus = cycleFocus(modelDialogFocuses(tabs), m.mdlg.focus, -1)
 		return m, nil
-	case tea.KeyUp, tea.KeyDown:
+	case "up", "down":
 		n := m.modelListRows(m.dialogModelList())
 		if n == 0 {
 			return m, nil
 		}
 		delta := 1
-		if msg.Type == tea.KeyUp {
+		if shortcut(msg) == "up" {
 			delta = -1
 		}
 		m.mdlg.sel = (m.mdlg.sel + delta + n) % n
@@ -740,9 +740,9 @@ func (m Model) handleModelDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// cursor now stands on.
 		m.mdlg = m.mdlg.repaired(m.modelDialogTabs())
 		return m, nil
-	case tea.KeyLeft, tea.KeyRight:
+	case "left", "right":
 		delta := 1
-		if msg.Type == tea.KeyLeft {
+		if shortcut(msg) == "left" {
 			delta = -1
 		}
 		return m.moveDialogValue(tabs, delta), nil
@@ -1510,7 +1510,7 @@ func fastLabel(opt *agent.ConfigOption) func(string) string {
 func (m Model) dialogValueRow(label string, opt *agent.ConfigOption, chosen string, focused bool, inner int, name func(string) string) string {
 	base, pick := styleFG(m.theme.Dim), styleFG(m.theme.Bright)
 	if focused {
-		band := selectionBand(lipgloss.ColorProfile(), lipgloss.NewStyle(), m.theme.SelectionBG)
+		band := selectionBand(m.theme.profile, lipgloss.NewStyle(), m.theme.SelectionBG)
 		base, pick = band.Foreground(m.theme.FG), band.Foreground(m.theme.Bright).Bold(true)
 	}
 	head := dialogMark(focused, false) + label

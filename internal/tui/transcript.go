@@ -4,13 +4,14 @@ import (
 	"cmp"
 	"encoding/json"
 	"fmt"
+	"image/color"
 	"path/filepath"
 	"strings"
 	"time"
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/charliek/craze/internal/agent"
@@ -694,7 +695,7 @@ type idSeg struct {
 	id spanID
 }
 
-func styleFG(c lipgloss.TerminalColor) lipgloss.Style { return lipgloss.NewStyle().Foreground(c) }
+func styleFG(c color.Color) lipgloss.Style { return lipgloss.NewStyle().Foreground(c) }
 
 // renderSegs styles and concatenates segs, clamping the result to width.
 func renderSegs(width int, segs ...seg) string {
@@ -754,7 +755,7 @@ func clampWidth(s string, w int) string {
 	if lipgloss.Width(s) <= w {
 		return s
 	}
-	return ansi.Truncate(s, w, "…")
+	return truncateCells(s, w, "…")
 }
 
 // sanitizeLine folds a string onto one line: escape sequences and control

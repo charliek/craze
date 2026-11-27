@@ -6,8 +6,6 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-
 	"github.com/charliek/craze/internal/agent"
 )
 
@@ -46,8 +44,8 @@ func TestBashJobRowLeavesTheSpinnerAndConnect(t *testing.T) {
 			if got := []bool{m.anySubagentRunning(), m.spinnerVisible(), m.wantFastTick(), m.connectBusy()}; !slices.Equal(got, []bool{c.busy, c.busy, c.busy, c.busy}) {
 				t.Fatalf("running %v, spinner %v, fast tick %v, /connect busy %v; want all %v", got[0], got[1], got[2], got[3], c.busy)
 			}
-			if !strings.Contains(m.View(), c.row.Description) {
-				t.Fatalf("the row is not drawn:\n%s", m.View())
+			if !strings.Contains(m.View().Content, c.row.Description) {
+				t.Fatalf("the row is not drawn:\n%s", m.View().Content)
 			}
 			later := m.now().Add(2 * time.Minute)
 			m.clock = func() time.Time { return later }
@@ -58,8 +56,8 @@ func TestBashJobRowLeavesTheSpinnerAndConnect(t *testing.T) {
 	}
 
 	m, _ := stopModel(t, agent.NativeProvider(), jobRow("t1.1.1", "npm run dev", agent.SubagentRunning))
-	m = pressKey(t, m, tea.KeyDown)
-	m = pressKey(t, m, tea.KeyEnter)
+	m = pressKey(t, m, "down")
+	m = pressKey(t, m, "enter")
 	if m.viewing != "t1.1.1" {
 		t.Fatalf("viewing %q; want the job's view", m.viewing)
 	}
@@ -92,8 +90,8 @@ func TestConnectOpensWhileAJobRuns(t *testing.T) {
 // to the job, whose result then says the user stopped it.
 func TestStopKeyOnAJobRow(t *testing.T) {
 	m, rec := stopModel(t, agent.NativeProvider(), jobRow("t1.1.1", "npm run dev", agent.SubagentRunning))
-	m = pressKey(t, m, tea.KeyDown)
-	m, cmd := pressKeyCmd(t, m, tea.KeyDelete)
+	m = pressKey(t, m, "down")
+	m, cmd := pressKeyCmd(t, m, "delete")
 	if cmd == nil {
 		t.Fatal("del on the job's row returned no Cmd; want the stop")
 	}

@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 from conftest import pid_alive, seed_host_idle_exit
-from test_tui import _ANSI, PTYCraze, _wait_fake_gone, _wait_output
+from test_tui import PTYCraze, _wait_fake_gone, _wait_output
 
 WAIT = 10.0
 
@@ -233,7 +233,7 @@ def test_host_stderr_lands_in_the_host_log(
         tui.write(b"\x04")
         assert tui.wait_exit(timeout=2) == 0, tui.screen()[-3000:]
         _wait_host_gone(tmp_path, entry["pid"], 5)
-    text = _ANSI.sub("", tui.screen())
+    text = tui.history()
     assert canary not in text, text[-3000:]
     assert "plugin dir skipped:" not in text, text[-3000:]
     log = _host_logs(tmp_path)

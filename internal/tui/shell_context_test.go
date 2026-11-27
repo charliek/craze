@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/charliek/craze/internal/agent"
 )
@@ -162,7 +162,7 @@ func TestShellContextLeadsAnInterjection(t *testing.T) {
 
 	m = plantShellResult(m, "git diff --stat", " a.go | 2 +-\n")
 	m.input.SetValue("look at this")
-	m = pumpKey(t, m, tea.KeyMsg{Type: tea.KeyCtrlL})
+	m = pumpKey(t, m, tea.KeyPressMsg{Code: 'l', Mod: tea.ModCtrl})
 
 	sent := stub.Interjections()
 	if len(sent) != 1 {

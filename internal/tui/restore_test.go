@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/backend"
@@ -254,7 +254,7 @@ func TestAttachMidTurnWithAnOpenQuestionCanAnswerAtOnce(t *testing.T) {
 			seq := r.m.foldedSeq()
 
 			// The answer, at once.
-			r.send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("1")})
+			r.send(textKey("1"))
 			if async {
 				r.answer()
 			}
@@ -267,7 +267,7 @@ func TestAttachMidTurnWithAnOpenQuestionCanAnswerAtOnce(t *testing.T) {
 			}
 
 			// The cancel, at once: Esc names the turn the snapshot said runs.
-			tm, cmd := r.m.gated(tea.KeyMsg{Type: tea.KeyEsc}, Model.update)
+			tm, cmd := r.m.gated(tea.KeyPressMsg{Code: tea.KeyEsc}, Model.update)
 			r.m = tm.(Model)
 			cancels := namedCmds(cmd, "cancelTurn")
 			if len(cancels) != 1 {
@@ -397,13 +397,13 @@ func TestARestoreDuringAHoldFoldsNothingTwice(t *testing.T) {
 	for _, ev := range old {
 		stream(eventMsg{ev: ev, gen: 1})
 	}
-	send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
+	send(textKey("x"))
 	snap := snapshotFolded(t, "inc-1", append(append([]agent.Event(nil), hello...), old...)...)
 	stream(restoreOf(r.m, snap, 2))
-	if got, want := heldKinds(r.m), []string{"tea.KeyMsg", "tui.restoreMsg"}; !slices.Equal(got, want) {
+	if got, want := heldKinds(r.m), []string{"tea.KeyPressMsg", "tui.restoreMsg"}; !slices.Equal(got, want) {
 		t.Fatalf("held behind the gate: %v, want %v — the replaced stream's events dropped as the restore was held", got, want)
 	}
-	send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	send(textKey("y"))
 	later := seqd(4, agent.Event{Type: agent.EventText, Text: "!"})
 	stream(eventMsg{ev: later[0], gen: 2})
 
@@ -934,7 +934,7 @@ func TestAnOutcomeUnknownIsNoAnswer(t *testing.T) {
 			t.Fatal("fixture: no card")
 		}
 		u.failing("asks.answer")
-		m = deliver(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("1")})
+		m = deliver(t, m, textKey("1"))
 		if c, ok := m.headCard(); !ok || c.ask == nil || c.ask.ID != "ask-1" || !hasLocalRow(m, entryNote, noAnswerCardNote) {
 			t.Fatalf("the card %+v, the rows %q — want the card kept and the unanswered answer's note", m.cards, mainRows(m))
 		}
@@ -973,7 +973,7 @@ func TestAnOutcomeUnknownIsNoAnswer(t *testing.T) {
 		m = deliver(t, m, enter())
 		awaitBarrier(t, open, "the turn opening")
 		u.failing("session.cancel")
-		tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+		tm, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
 		m = tm.(Model)
 		cancels := namedCmds(cmd, "cancelTurn")
 		if len(cancels) != 1 {
@@ -1266,7 +1266,7 @@ func TestARestoreRetiresTheTurnsTransients(t *testing.T) {
 	if stub.CancelsSent() != 0 || m.sendNowPending() {
 		t.Fatalf("Enter after the restore sent now against turn B: %d cancels, armed %v", stub.CancelsSent(), m.sendNowPending())
 	}
-	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	tm, _ = m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
 	if m = tm.(Model); m.quitting {
 		t.Fatal("Ctrl+C after the restore quit on a window armed for turn A")
 	}

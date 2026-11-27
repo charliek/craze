@@ -15,8 +15,8 @@ import (
 	"time"
 	"unsafe"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/backend"
@@ -343,7 +343,7 @@ func (r *switchRig) switchTo(to *laneBackend, rows ...roster.Row) {
 // openList presses ← on the empty composer and hands the list rows.
 func (r *switchRig) openList(rows ...roster.Row) {
 	r.t.Helper()
-	r.send(tea.KeyMsg{Type: tea.KeyLeft})
+	r.send(tea.KeyPressMsg{Code: tea.KeyLeft})
 	if !r.m.sessList.open {
 		r.t.Fatalf("← did not open the list:\n%s", plainView(r.m))
 	}
@@ -585,7 +585,7 @@ func TestASwitchFromTheHeldQueueTakesTheOldStreamOut(t *testing.T) {
 	a.push(backend.Item{Kind: backend.ItemEvent, Gen: 1, Event: seqd(1, agent.Event{Type: agent.EventText, Text: "a's words"})[0]})
 	r.send(r.readOf(gA))
 	r.send(runeKey('x'))
-	if got := heldKinds(r.m); !slices.Equal(got, []string{"tui.sessOpenedMsg", "tui.eventMsg", "tea.KeyMsg"}) {
+	if got := heldKinds(r.m); !slices.Equal(got, []string{"tui.sessOpenedMsg", "tui.eventMsg", "tea.KeyPressMsg"}) {
 		t.Fatalf("fixture: held %v", got)
 	}
 	close(release)
@@ -598,7 +598,7 @@ func TestASwitchFromTheHeldQueueTakesTheOldStreamOut(t *testing.T) {
 	if r.m.eng != b {
 		t.Fatal("the drained answer was not switched to")
 	}
-	if got := heldKinds(r.m); !slices.Equal(got, []string{"tea.KeyMsg"}) {
+	if got := heldKinds(r.m); !slices.Equal(got, []string{"tea.KeyPressMsg"}) {
 		t.Fatalf("after the switch the queue holds %v: A's event should be out of it, the key in it", got)
 	}
 	for _, rd := range r.reads {
@@ -853,12 +853,12 @@ func TestAnOpenAnsweredAfterTheUserMovedOnIsClosed(t *testing.T) {
 		listUp  bool
 		quitted bool
 	}{
-		{"back to the session behind", func(r *switchRig) { r.send(tea.KeyMsg{Type: tea.KeyEsc}) }, true, false, false},
+		{"back to the session behind", func(r *switchRig) { r.send(tea.KeyPressMsg{Code: tea.KeyEsc}) }, true, false, false},
 		{"the list left and opened again", func(r *switchRig) {
-			r.send(tea.KeyMsg{Type: tea.KeyEsc})
-			r.send(tea.KeyMsg{Type: tea.KeyLeft})
+			r.send(tea.KeyPressMsg{Code: tea.KeyEsc})
+			r.send(tea.KeyPressMsg{Code: tea.KeyLeft})
 		}, true, true, false},
-		{"craze quitting", func(r *switchRig) { r.send(tea.KeyMsg{Type: tea.KeyCtrlD}) }, true, true, true},
+		{"craze quitting", func(r *switchRig) { r.send(tea.KeyPressMsg{Code: 'd', Mod: tea.ModCtrl}) }, true, true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a, b := newLane(t, "a", "alpha"), newLane(t, "b", "bravo")
@@ -929,13 +929,13 @@ func TestAViewedSessionEndingReturnsToTheList(t *testing.T) {
 			if !ok || !row.ended || !row.here || row.key.id != "b" || row.closable() || row.cancellable() {
 				t.Fatalf("the ended session's row, its host listed %v: %+v (listed %v)", len(snap.Running) > 0, row, ok)
 			}
-			for _, k := range []tea.KeyMsg{{Type: tea.KeyEsc}, {Type: tea.KeyLeft}, enter(), {Type: tea.KeyCtrlX}} {
+			for _, k := range []tea.KeyPressMsg{{Code: tea.KeyEsc}, {Code: tea.KeyLeft}, enter(), {Code: 'x', Mod: tea.ModCtrl}} {
 				r.send(k)
 				if !r.m.sessList.open || len(r.opens) != 0 || !r.m.sessList.armed.zero() {
 					t.Fatalf("%v on the ended row: open %v, %d opens asked for, armed %+v",
 						k, r.m.sessList.open, len(r.opens), r.m.sessList.armed)
 				}
-				if k.Type != tea.KeyCtrlX && r.m.sessList.note != sessEndedNote {
+				if shortcut(k) != "ctrl+x" && r.m.sessList.note != sessEndedNote {
 					t.Fatalf("%v on the ended row: the hint line says %q", k, r.m.sessList.note)
 				}
 			}
@@ -1027,24 +1027,24 @@ func TestALostConnectionLeavesTheRowToTheRoster(t *testing.T) {
 			}
 			// The note lasts until a key: ↓ (one row, so it stays selected)
 			// shows what the row takes.
-			r.send(tea.KeyMsg{Type: tea.KeyDown})
+			r.send(tea.KeyPressMsg{Code: tea.KeyDown})
 			view := plainView(r.m)
 			if hint := plain(r.m.sessHintRow(r.m.sessLines())); r.m.sessList.sel != key || !strings.Contains(hint, "enter open") ||
 				!strings.Contains(hint, "ctrl+x close") || strings.Contains(view, "ended") || strings.Contains(view, "· here") ||
 				strings.Contains(view, sessEmptyNote) {
 				t.Fatalf("the list after the loss (hint %q):\n%s", hint, view)
 			}
-			for _, k := range []tea.KeyMsg{{Type: tea.KeyEsc}, {Type: tea.KeyLeft}} {
+			for _, k := range []tea.KeyPressMsg{{Code: tea.KeyEsc}, {Code: tea.KeyLeft}} {
 				r.send(k)
 				if !r.m.sessList.open || r.m.sessList.note != sessLostNote || len(r.opens) != 0 {
 					t.Fatalf("%v after the loss: open %v, note %q, %d opens", k, r.m.sessList.open, r.m.sessList.note, len(r.opens))
 				}
 			}
-			r.send(tea.KeyMsg{Type: tea.KeyCtrlX})
+			r.send(tea.KeyPressMsg{Code: 'x', Mod: tea.ModCtrl})
 			if r.m.sessList.armed != key {
 				t.Fatalf("ctrl+x on the idle row armed %+v", r.m.sessList.armed)
 			}
-			r.send(tea.KeyMsg{Type: tea.KeyCtrlX})
+			r.send(tea.KeyPressMsg{Code: 'x', Mod: tea.ModCtrl})
 			calls := namedCmds(r.last, "sessAction")
 			if len(calls) != 1 {
 				t.Fatal("the second ctrl+x sent no close")
@@ -1056,7 +1056,7 @@ func TestALostConnectionLeavesTheRowToTheRoster(t *testing.T) {
 
 			// Working on its host: ctrl+x stops its turn.
 			r.send(sessSnapMsg{gen: r.m.sessList.gen, snap: roster.Snapshot{Running: []roster.Row{row(roster.Reachable, engine.ActivityWorking)}}})
-			r.send(tea.KeyMsg{Type: tea.KeyCtrlX})
+			r.send(tea.KeyPressMsg{Code: 'x', Mod: tea.ModCtrl})
 			calls = namedCmds(r.last, "sessAction")
 			if len(calls) != 1 {
 				t.Fatal("ctrl+x on the working row sent nothing")
@@ -1163,8 +1163,8 @@ func TestTheBandHasNoRowsUntilTheListOpens(t *testing.T) {
 		t.Fatalf("a session list moved a frame before the list opened (%s)", frameLineDiff(b, a))
 	}
 
-	opened, _ := press(with, tea.KeyMsg{Type: tea.KeyLeft})
-	opened, _ = press(opened, tea.KeyMsg{Type: tea.KeyEsc})
+	opened, _ := press(with, tea.KeyPressMsg{Code: tea.KeyLeft})
+	opened, _ = press(opened, tea.KeyPressMsg{Code: tea.KeyEsc})
 	if opened.sessList.open || !opened.bandOn {
 		t.Fatalf("fixture: list open %v, band on %v", opened.sessList.open, opened.bandOn)
 	}
@@ -1292,8 +1292,8 @@ func TestFinishRunClosesARetiredBackend(t *testing.T) {
 var (
 	tuiFields = []string{
 		"theme", "vp", "input", "yolo", "width", "height", "ready", "expanded", "transcriptLayout", "showTranscriptLayout", "quitting", "mouseEnabled",
-		"lay", "layouts", "mouseAll", "tickGen", "tickLive", "tickFast", "spinFrame", "hiddenRetryLive",
-		"clock", "paintEveryEvent", "frozen", "frameStart", "terminalTitle", "lastTitle", "term", "shell",
+		"lay", "layouts", "tickGen", "tickLive", "tickFast", "spinFrame", "hiddenRetryLive",
+		"clock", "paintEveryEvent", "frozen", "frameStart", "terminalTitle", "background", "shell",
 		"owner", "exit",
 		"host", "lastHost", "viewer", "sessionIndex", "crazeID", "webSearch", "resume", "loadSession", "claimSession",
 		"refuseLoad", "onEngine", "onQuit", "providerLocked", "persistProvider", "fallbackDefault", "pickedExplicit",

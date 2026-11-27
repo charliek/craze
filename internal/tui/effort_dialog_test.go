@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/harness"
@@ -94,7 +94,7 @@ func highlight(t *testing.T, m Model, id string) Model {
 		if list := m.dialogModelList(); m.mdlg.sel < len(list) && list[m.mdlg.sel].ID == id {
 			return m
 		}
-		m = pressKey(t, m, tea.KeyDown)
+		m = pressKey(t, m, "down")
 	}
 	t.Fatalf("no row %q in the dialog's list", id)
 	return m
@@ -155,11 +155,11 @@ func TestATouchedEffortIsKeptAsTheCursorMoves(t *testing.T) {
 	m, _ := factsStub(t, "one", true)
 	m = openDialog(t, m)
 	m = highlight(t, m, "two")
-	m = pressKey(t, m, tea.KeyTab)
+	m = pressKey(t, m, "tab")
 	if m.mdlg.focus != dialogFocus(agent.NativeEffortID) {
 		t.Fatalf("tab focused %q, want the effort row", m.mdlg.focus)
 	}
-	m = pressKey(t, m, tea.KeyLeft)
+	m = pressKey(t, m, "left")
 	if got := effortRow(t, m); got != "> effort  minimal  low  medium  high  [xhigh]  max" {
 		t.Fatalf("after ← on two the row is %q", got)
 	}
@@ -223,8 +223,8 @@ func TestTheDialogSendsTheEffortItShows(t *testing.T) {
 		t.Fatalf("an untouched current model sent %v", got)
 	}
 	m = openDialog(t, m)
-	m = pressKey(t, m, tea.KeyTab)
-	m = pressKey(t, m, tea.KeyRight)
+	m = pressKey(t, m, "tab")
+	m = pressKey(t, m, "right")
 	if got := effortRow(t, m); got != "> effort  [low]  medium  high" {
 		t.Fatalf("→ on a row with nothing bracketed: %q; want its first level", got)
 	}
@@ -252,8 +252,8 @@ func TestACatalogDeltaReseedsTheUntouchedEffort(t *testing.T) {
 	if got := effortRow(t, m); got != "  effort  minimal  low  [medium]  high  xhigh  max" {
 		t.Fatalf("after the delta the untouched row is %q", got)
 	}
-	m = pressKey(t, m, tea.KeyTab)
-	m = pressKey(t, m, tea.KeyRight)
+	m = pressKey(t, m, "tab")
+	m = pressKey(t, m, "right")
 	moved[1].SwitchEffort = "xhigh"
 	m = feed(t, m, catalogDelta(901, 51, moved))
 	if got := effortRow(t, m); got != "> effort  minimal  low  medium  [high]  xhigh  max" {

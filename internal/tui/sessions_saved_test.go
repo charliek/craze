@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/backend"
@@ -35,7 +35,7 @@ func savedKey(id string) sessKey { return sessKey{id: "\x00saved:" + id} }
 // saved group (enter on its line).
 func (r *switchRig) openSavedList(running []roster.Row, saved ...sessions.Row) {
 	r.t.Helper()
-	r.send(tea.KeyMsg{Type: tea.KeyLeft})
+	r.send(tea.KeyPressMsg{Code: tea.KeyLeft})
 	r.send(sessSnapMsg{gen: r.m.sessList.gen, snap: roster.Snapshot{Running: running, Saved: saved}})
 	r.m = selectKey(r.t, r.m, sessSavedLine)
 	r.send(enter())
@@ -150,7 +150,7 @@ func TestSessionsCtrlXDoesNothingOnASavedRow(t *testing.T) {
 	m = selectKey(t, m, savedKey("wrap"))
 	for range 2 {
 		var cmd tea.Cmd
-		m, cmd = press(m, tea.KeyMsg{Type: tea.KeyCtrlX})
+		m, cmd = press(m, tea.KeyPressMsg{Code: 'x', Mod: tea.ModCtrl})
 		if cmd != nil || !m.sessList.armed.zero() || m.sessList.note != "" {
 			t.Fatalf("ctrl+x on a saved row: command %v, armed %+v, note %q", cmd != nil, m.sessList.armed, m.sessList.note)
 		}

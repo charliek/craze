@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/charliek/craze/internal/agent"
 )
@@ -79,7 +79,7 @@ body must not be injected
 	tm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 30})
 	m = tm.(Model)
 	m.input.SetValue("/demo")
-	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	tm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
 	m = tm.(Model)
 	if m.input.Value() != "/demo " {
 		t.Fatalf("complete %q", m.input.Value())
@@ -94,7 +94,7 @@ body must not be injected
 	// The catalog is the last section of a box that scrolls, so the skill row
 	// is only on screen once the box has been paged to the bottom.
 	for i := 0; i < 10; i++ {
-		m = pressKey(t, m, tea.KeyPgDown)
+		m = pressKey(t, m, "pgdown")
 	}
 	view := plainView(m)
 	if !strings.Contains(view, "/demo") {
@@ -209,7 +209,7 @@ description: named by directory
 		t.Fatalf("fromdir catalog %#v ok=%v", it, ok)
 	}
 	m.input.SetValue("/fromdir")
-	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	tm, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
 	m = tm.(Model)
 	if m.input.Value() != "/fromdir " {
 		t.Fatalf("complete %q", m.input.Value())
@@ -228,7 +228,7 @@ name: demo
 description: after start
 ---
 `)
-	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	tm, _ := m.Update(runeKey('/'))
 	m = tm.(Model)
 	if m.input.Value() != "/" {
 		t.Fatalf("composer %q", m.input.Value())

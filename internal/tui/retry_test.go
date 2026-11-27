@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/transcript"
@@ -145,7 +145,7 @@ func TestCtrlYSkipsARetractedReply(t *testing.T) {
 	)
 	ctrlY := func() {
 		t.Helper()
-		tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlY})
+		tm, cmd := m.Update(tea.KeyPressMsg{Code: 'y', Mod: tea.ModCtrl})
 		m = tm.(Model)
 		if msg := runCmd(cmd); msg != nil {
 			tm, _ = m.Update(msg)

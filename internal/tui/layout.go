@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -365,6 +365,10 @@ func (m *Model) relayout(stick bool) {
 		return
 	}
 	m.pruneSubs()
+	// A resize rewraps the draft. Measure its new height before sizing bands.
+	if m.input.Width() != m.composerInner() {
+		m.input.SetWidth(m.width)
+	}
 	m.lay = m.computeLayout()
 	// A box's text field scrolls by the width it is drawn at, so it gets that
 	// width here, where the box is measured (fitDialogFields).
@@ -385,12 +389,6 @@ func (m *Model) relayout(stick bool) {
 	}
 	m.vp.Width = m.width
 	m.vp.Height = max(1, m.lay.Region(regionTranscript).Height())
-	// bubbles never grows the textarea on its own, so the height it holds has
-	// to be pushed into it explicitly — and it is the whole draft, not the
-	// band: a textarea tall enough for everything it holds never scrolls, and
-	// composerView windows onto the rows it renders.
-	m.input.SetWidth(max(1, m.width))
-	m.input.SetHeight(m.composerRows())
 	if stick {
 		m.vp.GotoBottom()
 	}

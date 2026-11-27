@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/charliek/craze/internal/agent"
 )
@@ -234,14 +234,14 @@ func TestAPastedControlLeavesTheChipSending(t *testing.T) {
 	stubClipboardImage(t, func() ([]byte, error) { return img, nil })
 
 	m, stub := imageModel(t)
-	tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlV})
+	tm, cmd := m.Update(tea.KeyPressMsg{Code: 'v', Mod: tea.ModCtrl})
 	m = deliver(t, tm.(Model), runCmd(cmd))
 	const typed = "“look” at[2J this "
 	if got := m.input.Value(); got != typed {
 		t.Fatalf("the pasted text is %q, want %q", got, typed)
 	}
 	img = pngBytes(t, 16, 16)
-	tm, cmd = m.Update(tea.KeyMsg{Type: tea.KeyCtrlV})
+	tm, cmd = m.Update(tea.KeyPressMsg{Code: 'v', Mod: tea.ModCtrl})
 	m = settleImages(t, deliver(t, tm.(Model), runCmd(cmd)))
 	if got := m.input.Value(); got != typed+"[Image #1]" || len(m.images.list) != 1 {
 		t.Fatalf("the draft is %q with %d images", got, len(m.images.list))
@@ -313,7 +313,7 @@ func TestBinaryClipboardTextNeverLands(t *testing.T) {
 
 	// The composer, its `!` command line, and a clipboard image it refuses.
 	m, _ := imageModel(t)
-	tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlV})
+	tm, cmd := m.Update(tea.KeyPressMsg{Code: 'v', Mod: tea.ModCtrl})
 	m = deliver(t, tm.(Model), runCmd(cmd))
 	if m.input.Value() != "" {
 		t.Fatalf("the composer took %q", m.input.Value())
@@ -322,7 +322,7 @@ func TestBinaryClipboardTextNeverLands(t *testing.T) {
 
 	s, _ := imageModel(t)
 	s = typeComposer(t, s, "!file ")
-	tm, cmd = s.Update(tea.KeyMsg{Type: tea.KeyCtrlV})
+	tm, cmd = s.Update(tea.KeyPressMsg{Code: 'v', Mod: tea.ModCtrl})
 	s = deliver(t, tm.(Model), runCmd(cmd))
 	if s.input.Value() != "!file " {
 		t.Fatalf("the command line took %q", s.input.Value())
@@ -331,7 +331,7 @@ func TestBinaryClipboardTextNeverLands(t *testing.T) {
 
 	stubClipboardImage(t, func() ([]byte, error) { return pngBytes(t, 4, 4), nil })
 	r, _ := imageModel(t)
-	tm, cmd = r.Update(tea.KeyMsg{Type: tea.KeyCtrlV})
+	tm, cmd = r.Update(tea.KeyPressMsg{Code: 'v', Mod: tea.ModCtrl})
 	r = deliver(t, tm.(Model), runCmd(cmd))
 	if r.input.Value() != "" || len(r.images.list) != 0 {
 		t.Fatalf("a refused clipboard image left %q, %d images", r.input.Value(), len(r.images.list))
@@ -344,7 +344,7 @@ func TestBinaryClipboardTextNeverLands(t *testing.T) {
 	// The session list's input.
 	l, fs, _ := newSessModel(t, 100, 30)
 	l = newList(t, l, fs)
-	tm, cmd = l.Update(tea.KeyMsg{Type: tea.KeyCtrlV})
+	tm, cmd = l.Update(tea.KeyPressMsg{Code: 'v', Mod: tea.ModCtrl})
 	l = deliver(t, tm.(Model), runCmd(cmd))
 	if v, _ := inputOf(l); v != "" {
 		t.Fatalf("the list's input took %q", v)
@@ -353,7 +353,7 @@ func TestBinaryClipboardTextNeverLands(t *testing.T) {
 
 	// /connect's key field.
 	k := connectKeyStep(t, nativeStub(), t.TempDir(), func(string) string { return "" })
-	tm, cmd = k.Update(tea.KeyMsg{Type: tea.KeyCtrlV})
+	tm, cmd = k.Update(tea.KeyPressMsg{Code: 'v', Mod: tea.ModCtrl})
 	k = deliver(t, tm.(Model), runCmd(cmd))
 	if got := k.cdlg.key.Value(); got != "" {
 		t.Fatalf("the key field took %q", got)

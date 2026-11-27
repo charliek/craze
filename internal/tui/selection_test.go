@@ -2,17 +2,15 @@ package tui
 
 import (
 	"fmt"
-	"io"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/colorprofile"
 	"github.com/charmbracelet/x/ansi"
-	"github.com/muesli/termenv"
-	"github.com/rivo/uniseg"
 
 	"github.com/charliek/craze/internal/agent"
 )
@@ -55,19 +53,19 @@ func captureCopies(t *testing.T) *copyRecorder {
 // reports them.
 func mousePress(t *testing.T, m Model, x, y int) Model {
 	t.Helper()
-	return mouse(t, m, tea.MouseMsg{X: x, Y: y, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	return mouse(t, m, tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
 }
 
 func motion(t *testing.T, m Model, x, y int) Model {
 	t.Helper()
-	return mouse(t, m, tea.MouseMsg{X: x, Y: y, Button: tea.MouseButtonLeft, Action: tea.MouseActionMotion})
+	return mouse(t, m, tea.MouseMotionMsg{X: x, Y: y, Button: tea.MouseLeft})
 }
 
 // release reports ButtonNone, which is what an X10 terminal sends and what the
 // tracked pressed button exists to cope with.
 func release(t *testing.T, m Model, x, y int) Model {
 	t.Helper()
-	return mouse(t, m, tea.MouseMsg{X: x, Y: y, Button: tea.MouseButtonNone, Action: tea.MouseActionRelease})
+	return mouse(t, m, tea.MouseReleaseMsg{X: x, Y: y, Button: tea.MouseNone})
 }
 
 func mouse(t *testing.T, m Model, msg tea.MouseMsg) Model {
@@ -258,7 +256,7 @@ func TestReleaseWithButtonNoneFinalises(t *testing.T) {
 	if copies := rec.copies(); len(copies) != 1 || copies[0] != "alpha" {
 		t.Fatalf("a ButtonNone release copied %q", copies)
 	}
-	if m.pressed != tea.MouseButtonNone {
+	if m.pressed != tea.MouseNone {
 		t.Fatalf("the pressed button survived the release: %v", m.pressed)
 	}
 	// A second release with nothing pressed is not a second copy.
@@ -400,7 +398,7 @@ func TestCtrlYCopiesTheLastReply(t *testing.T) {
 	if len(m.main.plainRows()) < 3 {
 		t.Fatalf("the fixture should have wrapped: %d rows", len(m.main.plainRows()))
 	}
-	tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlY})
+	tm, cmd := m.Update(tea.KeyPressMsg{Code: 'y', Mod: tea.ModCtrl})
 	m = tm.(Model)
 	if msg := runCmd(cmd); msg != nil {
 		tm, _ = m.Update(msg)
@@ -422,7 +420,7 @@ func TestCtrlYCopiesTheSelectionAndKeepsIt(t *testing.T) {
 	m := selModel(t, &now, "alpha bravo")
 	top := m.lay.Region(regionTranscript).Top
 	m = drag(t, m, 0, top, 4, top)
-	tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlY})
+	tm, cmd := m.Update(tea.KeyPressMsg{Code: 'y', Mod: tea.ModCtrl})
 	m = tm.(Model)
 	if msg := runCmd(cmd); msg != nil {
 		tm, _ = m.Update(msg)
@@ -458,7 +456,7 @@ func TestNoMouseIgnoresInjectedMouseMessages(t *testing.T) {
 	if copies := rec.copies(); len(copies) != 0 {
 		t.Fatalf("--no-mouse copied %q", copies)
 	}
-	m = mouse(t, m, tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonWheelUp, X: 1, Y: top})
+	m = mouse(t, m, tea.MouseWheelMsg{Button: tea.MouseWheelUp, X: 1, Y: top})
 	if m.vp.YOffset != offset {
 		t.Fatalf("--no-mouse scrolled to %d, want %d", m.vp.YOffset, offset)
 	}
@@ -480,7 +478,7 @@ func TestCardArrivalDiscardsTheDrag(t *testing.T) {
 		t.Fatal("the drag should be live")
 	}
 	m = cardEvent(t, m, stub, agent.Event{Type: agent.EventQuestion, Question: stubQuestion()})
-	if m.sel.on || m.pressed != tea.MouseButtonNone {
+	if m.sel.on || m.pressed != tea.MouseNone {
 		t.Fatalf("the card should have dropped the drag: %+v %v", m.sel, m.pressed)
 	}
 	m = release(t, m, 6, top+1)
@@ -537,12 +535,12 @@ func TestSelectingDoesNotReRenderTheTranscript(t *testing.T) {
 	before := m.main.renders
 	m = mousePress(t, m, 0, top)
 	m = motion(t, m, 6, top+1)
-	_ = m.View()
+	_ = m.View().Content
 	if m.main.renders != before {
 		t.Fatalf("selecting re-rendered %d entries", m.main.renders-before)
 	}
 	// And the highlight really is on the screen.
-	if !strings.Contains(m.View(), selectionSeq(lipgloss.ColorProfile(), m.theme.SelectionBG)) {
+	if !strings.Contains(m.View().Content, selectionSeq(m.theme.profile, m.theme.SelectionBG)) {
 		t.Fatal("the selection background is missing from the frame")
 	}
 }
@@ -571,7 +569,7 @@ func selectedCells(s, bg string) []bool {
 // background — and no cell outside it does.
 func TestHighlightSpanPaintsExactlyTheSpan(t *testing.T) {
 	th := Preset("tokyo-night")
-	bg := selectionSeq(lipgloss.ColorProfile(), th.SelectionBG)
+	bg := selectionSeq(th.profile, th.SelectionBG)
 	if bg == "" {
 		t.Skip("no colour profile")
 	}
@@ -690,33 +688,32 @@ func TestSelectionBandAtEveryDepth(t *testing.T) {
 	for _, name := range ThemeNames() {
 		th := Preset(name)
 		c := th.SelectionBG
-		n, err := strconv.Atoi(c.ANSI256)
-		if err != nil || n < 16 || n > 255 {
-			t.Fatalf("%s: invalid 256-color selection index %q", name, c.ANSI256)
+		n, ok := presetFor(name, colorprofile.ANSI256).SelectionBG.(ansi.IndexedColor)
+		if !ok || n < 16 {
+			t.Fatalf("%s: invalid 256-color selection index %v", name, n)
 		}
 		for _, tc := range []struct {
-			p       termenv.Profile
+			p       colorprofile.Profile
 			seq     string
 			bg      string
 			reverse bool
 		}{
-			{termenv.TrueColor, "\x1b[" + ansiBG(c.TrueColor) + "m", ansiBG(c.TrueColor), false},
-			{termenv.ANSI256, fmt.Sprintf("\x1b[48;5;%dm", n), fmt.Sprintf("48;5;%d", n), false},
-			{termenv.ANSI, "\x1b[7m", "", true},
-			{termenv.Ascii, "", "", false},
+			{colorprofile.TrueColor, "\x1b[" + ansiBG(depthHex(c)) + "m", ansiBG(depthHex(c)), false},
+			{colorprofile.ANSI256, fmt.Sprintf("\x1b[48;5;%dm", n), fmt.Sprintf("48;5;%d", n), false},
+			{colorprofile.ANSI, "\x1b[7m", "", true},
+			{colorprofile.Ascii, "", "", false},
 		} {
-			if got := selectionSeq(tc.p, c); got != tc.seq {
-				t.Errorf("%s %s: selectionSeq = %q, want %q", name, tc.p.Name(), got, tc.seq)
+			resolved := presetFor(name, tc.p)
+			if got := selectionSeq(tc.p, resolved.SelectionBG); got != tc.seq {
+				t.Errorf("%s %s: selectionSeq = %q, want %q", name, tc.p.String(), got, tc.seq)
 			}
-			r := lipgloss.NewRenderer(io.Discard)
-			r.SetColorProfile(tc.p)
-			cells := sgrCells(selectionBand(tc.p, r.NewStyle().Foreground(th.Bright), c).Render("x"))
+			cells := sgrCells(selectionBand(tc.p, styleFG(resolved.Bright), resolved.SelectionBG).Render("x"))
 			if len(cells) != 1 || cells[0].bg != tc.bg || cells[0].reverse != tc.reverse {
-				t.Errorf("%s %s: selectionBand paints %+v, want bg %q reverse %v", name, tc.p.Name(), cells, tc.bg, tc.reverse)
+				t.Errorf("%s %s: selectionBand paints %+v, want bg %q reverse %v", name, tc.p.String(), cells, tc.bg, tc.reverse)
 			}
 		}
 	}
-	if seq := selectionSeq(termenv.TrueColor, Preset("tokyo-night").SelectionBG); !strings.HasPrefix(seq, "\x1b[48;2;") {
+	if seq := selectionSeq(colorprofile.TrueColor, Preset("tokyo-night").SelectionBG); !strings.HasPrefix(seq, "\x1b[48;2;") {
 		t.Fatalf("the true-colour band is %q, want a 48;2 background", seq)
 	}
 }
@@ -728,10 +725,9 @@ func TestSelectionBandAtEveryDepth(t *testing.T) {
 // the case only highlightSpan's closing reset can turn reverse off for: a
 // styled tail replays the row's own reset.
 func TestHighlightSpanBandStopsAtTheSpan(t *testing.T) {
-	th := Preset("craze-dark")
 	styled := "\x1b[91maaaa\x1b[m" + "bbbb" + "\x1b[94mcccc\x1b[0m" + "dddd"
-	for _, p := range []termenv.Profile{termenv.TrueColor, termenv.ANSI256, termenv.ANSI} {
-		bg := selectionSeq(p, th.SelectionBG)
+	for _, p := range []colorprofile.Profile{colorprofile.TrueColor, colorprofile.ANSI256, colorprofile.ANSI} {
+		bg := selectionSeq(p, presetFor("craze-dark", p).SelectionBG)
 		for _, tc := range []struct {
 			name   string
 			line   string
@@ -745,30 +741,30 @@ func TestHighlightSpanBandStopsAtTheSpan(t *testing.T) {
 		} {
 			got := highlightSpan(tc.line, tc.lo, tc.hi, bg)
 			if plain(got) != plain(tc.line) {
-				t.Fatalf("%s %s: text changed: %q", p.Name(), tc.name, plain(got))
+				t.Fatalf("%s %s: text changed: %q", p.String(), tc.name, plain(got))
 			}
 			if head := ansi.Truncate(tc.line, tc.lo, ""); !strings.HasPrefix(got, head) {
-				t.Errorf("%s %s: the row before the band changed: %q", p.Name(), tc.name, got)
+				t.Errorf("%s %s: the row before the band changed: %q", p.String(), tc.name, got)
 			}
 			was, is := sgrCells(tc.line), sgrCells(got)
 			if len(is) != len(was) {
-				t.Fatalf("%s %s: %d cells, want %d", p.Name(), tc.name, len(is), len(was))
+				t.Fatalf("%s %s: %d cells, want %d", p.String(), tc.name, len(is), len(was))
 			}
 			for x := range is {
 				if x < tc.lo || x > tc.hi {
 					if is[x] != was[x] {
 						t.Errorf("%s %s: cell %d outside the band is %+v, want %+v as before: %q",
-							p.Name(), tc.name, x, is[x], was[x], got)
+							p.String(), tc.name, x, is[x], was[x], got)
 					}
 					continue
 				}
 				on := is[x].reverse
-				if p != termenv.ANSI {
+				if p != colorprofile.ANSI {
 					on = is[x].bg == strings.TrimSuffix(strings.TrimPrefix(bg, "\x1b["), "m")
 				}
 				if !on || is[x].fg != was[x].fg {
 					t.Errorf("%s %s: cell %d inside the band is %+v (band %q), want the band over fg %q: %q",
-						p.Name(), tc.name, x, is[x], bg, was[x].fg, got)
+						p.String(), tc.name, x, is[x], bg, was[x].fg, got)
 				}
 			}
 		}
@@ -866,7 +862,7 @@ func TestPressBelowTheContentStartsNoSelection(t *testing.T) {
 	if copies := rec.copies(); len(copies) != 0 {
 		t.Fatalf("blank space copied %q", copies)
 	}
-	if bg := selectionSeq(lipgloss.ColorProfile(), m.theme.SelectionBG); bg != "" && strings.Contains(m.View(), bg) {
+	if bg := selectionSeq(m.theme.profile, m.theme.SelectionBG); bg != "" && strings.Contains(m.View().Content, bg) {
 		t.Fatalf("a highlight was painted for a gesture over blank space:\n%s", plainView(m))
 	}
 	// A press on the last row of content is still a press, one row above the
@@ -898,7 +894,7 @@ func TestDoubleClickSelectsAOneCellWord(t *testing.T) {
 	if got := m.selectionText(); got != "I" {
 		t.Fatalf("selected %q, want %q", got, "I")
 	}
-	if bg := selectionSeq(lipgloss.ColorProfile(), m.theme.SelectionBG); bg != "" && !strings.Contains(m.View(), bg) {
+	if bg := selectionSeq(m.theme.profile, m.theme.SelectionBG); bg != "" && !strings.Contains(m.View().Content, bg) {
 		t.Fatal("the one-cell word is not highlighted")
 	}
 	m = release(t, m, 0, top)
@@ -909,7 +905,7 @@ func TestDoubleClickSelectsAOneCellWord(t *testing.T) {
 		t.Fatalf("missing the note:\n%s", plainView(m))
 	}
 	// And Ctrl+Y takes that word, not the whole reply behind it.
-	tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlY})
+	tm, cmd := m.Update(tea.KeyPressMsg{Code: 'y', Mod: tea.ModCtrl})
 	m = tm.(Model)
 	if msg := runCmd(cmd); msg != nil {
 		tm, _ = m.Update(msg)
@@ -938,12 +934,12 @@ func selectedText(s, bg string) string {
 }
 
 // TestHighlightCoversWhatTheCopyTakes: cutCells snaps a grapheme straddling
-// either edge of the span outward, and ansi.Truncate snaps inward, so a wide
+// either edge of the span outward, and truncateCells snaps inward, so a wide
 // grapheme across the right endpoint used to be copied and left unpainted. The
 // two have to name the same graphemes — without breaking the width invariant.
 func TestHighlightCoversWhatTheCopyTakes(t *testing.T) {
 	th := Preset("tokyo-night")
-	bg := selectionSeq(lipgloss.ColorProfile(), th.SelectionBG)
+	bg := selectionSeq(th.profile, th.SelectionBG)
 	if bg == "" {
 		t.Skip("no colour profile")
 	}
@@ -982,12 +978,8 @@ func TestHighlightCoversWhatTheCopyTakes(t *testing.T) {
 	}
 }
 
-// TestTheTUIsWidthsAgree: selectionText measures a row with ansi.StringWidth
-// and copies it with cutCells, which walks uniseg's graphemes, and clampWidth
-// measures with lipgloss and cuts with ansi.Truncate. Each pair has to agree,
-// or a whole-row copy drops its last cells and a clamped title overruns its
-// budget. x/ansi v0.11.9 disagreed with uniseg on both rows below, which is why
-// it is held (plan 049); a bump of either library that splits them fails here.
+// Copying, trimming and terminal layout must use the same cell coordinates.
+// In particular, an ASCII digit can begin a two-cell keycap grapheme.
 func TestTheTUIsWidthsAgree(t *testing.T) {
 	for _, s := range []string{
 		"plain ascii",
@@ -1000,8 +992,12 @@ func TestTheTUIsWidthsAgree(t *testing.T) {
 		"🇯🇵 flag",
 	} {
 		w := ansi.StringWidth(s)
-		if u := uniseg.StringWidth(s); u != w {
-			t.Errorf("%q: ansi.StringWidth %d, uniseg %d", s, w, u)
+		cells := 0
+		for _, width := range displayCells(s) {
+			cells += width
+		}
+		if cells != w {
+			t.Errorf("%q: renderer width %d, display cells %d", s, w, cells)
 		}
 		if got := cutCells(s, 0, w); got != s {
 			t.Errorf("%q: the whole-row cut copies %q", s, got)

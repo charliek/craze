@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/charliek/craze/internal/roster"
 	"github.com/charliek/craze/internal/sessions"
@@ -138,7 +138,7 @@ func typeList(t *testing.T, m Model, text string) (Model, tea.Cmd) {
 	var last tea.Cmd
 	for _, r := range text {
 		var cmd tea.Cmd
-		m, cmd = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		m, cmd = press(m, runeKey(r))
 		if cmd != nil {
 			last = cmd
 		}
@@ -257,7 +257,7 @@ func TestTheListHasAnInputOnlyWhenItCanStartSessions(t *testing.T) {
 	}
 
 	n, fs, _ := newSessModel(t, 80, 24)
-	opened, cmd := press(n, tea.KeyMsg{Type: tea.KeyLeft})
+	opened, cmd := press(n, tea.KeyPressMsg{Code: tea.KeyLeft})
 	if !opened.sessList.in.on || !strings.Contains(plainView(opened), sessInputPlaceholder) {
 		t.Fatalf("no input:\n%s", plainView(opened))
 	}
@@ -321,7 +321,7 @@ func TestTheInputTakesTheKeys(t *testing.T) {
 	m = newList(t, m, fs)
 	here := m.sessList.sel
 
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyDown})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyDown})
 	if m.sessList.sel == here {
 		t.Fatal("↓ with nothing typed did not move the list")
 	}
@@ -330,27 +330,27 @@ func TestTheInputTakesTheKeys(t *testing.T) {
 		t.Fatalf("typed %q, open %v", v, m.sessList.open)
 	}
 	// ← and → with something typed are the cursor's.
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyLeft})
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyLeft})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyLeft})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyLeft})
 	if _, cur := inputOf(m); cur != 2 || !m.sessList.open {
 		t.Fatalf("← ← : cursor %d, open %v", cur, m.sessList.open)
 	}
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRight})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyRight})
 	if _, cur := inputOf(m); cur != 3 || len(fs.opened()) != 0 {
 		t.Fatalf("→ : cursor %d, opens %v", cur, fs.opened())
 	}
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyTab})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyTab})
 	if v, _ := inputOf(m); v != "jk q" {
 		t.Fatalf("tab changed the input to %q", v)
 	}
 	// ↑/↓ still move the list with something typed and no popup.
 	was := m.sessList.sel
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyUp})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyUp})
 	if m.sessList.sel == was {
 		t.Fatal("↑ with text typed did not move the list")
 	}
 	// ctrl+s regroups, whatever is typed.
-	if g, _ := press(m, tea.KeyMsg{Type: tea.KeyCtrlS}); !g.sessList.byDir {
+	if g, _ := press(m, tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl}); !g.sessList.byDir {
 		t.Fatal("ctrl+s did not regroup")
 	}
 	// A paste asked for in the input lands there, folded onto one line.
@@ -359,20 +359,20 @@ func TestTheInputTakesTheKeys(t *testing.T) {
 		t.Fatalf("pasted into %q", v)
 	}
 	// A later `@` is prompt text: no popup.
-	later, _ := press(m, tea.KeyMsg{Type: tea.KeyEnd})
+	later, _ := press(m, tea.KeyPressMsg{Code: tea.KeyEnd})
 	later, _ = typeList(t, later, " @lu")
 	if later.sessList.in.at.visible() {
 		t.Fatal("an @ after the first word opened the popup")
 	}
 	// esc clears; the next leaves.
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 	if v, _ := inputOf(m); v != "" || !m.sessList.open {
 		t.Fatalf("esc: input %q, open %v", v, m.sessList.open)
 	}
-	if left, _ := press(m, tea.KeyMsg{Type: tea.KeyEsc}); left.sessList.open {
+	if left, _ := press(m, tea.KeyPressMsg{Code: tea.KeyEsc}); left.sessList.open {
 		t.Fatal("esc on an empty input did not leave")
 	}
-	if left, _ := press(m, tea.KeyMsg{Type: tea.KeyLeft}); left.sessList.open {
+	if left, _ := press(m, tea.KeyPressMsg{Code: tea.KeyLeft}); left.sessList.open {
 		t.Fatal("← on an empty input did not leave")
 	}
 	// enter on an empty input opens the selected row.
@@ -388,16 +388,16 @@ func TestTheInputTakesTheKeys(t *testing.T) {
 		t.Fatal("@ did not open the popup")
 	}
 	was = pop.sessList.sel
-	pop, _ = press(pop, tea.KeyMsg{Type: tea.KeyDown})
+	pop, _ = press(pop, tea.KeyPressMsg{Code: tea.KeyDown})
 	if pop.sessList.sel != was || pop.sessList.in.at.sel != 1 {
 		t.Fatalf("↓ with the popup up: list %+v (was %+v), popup %d", pop.sessList.sel, was, pop.sessList.in.at.sel)
 	}
 	// esc hides the popup and keeps the text; the next esc clears it.
-	pop, _ = press(pop, tea.KeyMsg{Type: tea.KeyEsc})
+	pop, _ = press(pop, tea.KeyPressMsg{Code: tea.KeyEsc})
 	if v, _ := inputOf(pop); pop.sessList.in.at.visible() || v != "@" {
 		t.Fatalf("esc over the popup: visible %v, input %q", pop.sessList.in.at.visible(), v)
 	}
-	pop, _ = press(pop, tea.KeyMsg{Type: tea.KeyEsc})
+	pop, _ = press(pop, tea.KeyPressMsg{Code: tea.KeyEsc})
 	if v, _ := inputOf(pop); v != "" || !pop.sessList.open {
 		t.Fatalf("the second esc: input %q, open %v", v, pop.sessList.open)
 	}
@@ -405,11 +405,11 @@ func TestTheInputTakesTheKeys(t *testing.T) {
 	// ctrl+x is the list's with something typed; ctrl+d quits.
 	x := selectKey(t, m, runKey("pty"))
 	x, _ = typeList(t, x, "hi")
-	x, _ = press(x, tea.KeyMsg{Type: tea.KeyCtrlX})
+	x, _ = press(x, tea.KeyPressMsg{Code: 'x', Mod: tea.ModCtrl})
 	if x.sessList.armed != runKey("pty") {
 		t.Fatal("ctrl+x with text typed did not arm the close")
 	}
-	if q, _ := press(x, tea.KeyMsg{Type: tea.KeyCtrlD}); !q.quitting {
+	if q, _ := press(x, tea.KeyPressMsg{Code: 'd', Mod: tea.ModCtrl}); !q.quitting {
 		t.Fatal("ctrl+d with text typed did not quit")
 	}
 }
@@ -455,8 +455,8 @@ func TestTheRuleNamesTheTarget(t *testing.T) {
 	saved := selectKey(t, m, sessSavedLine)
 	check("the saved line", saved, "new session → ~/projects/craze · ")
 	saved, _ = press(saved, enter())
-	saved, _ = press(saved, tea.KeyMsg{Type: tea.KeyDown})
-	saved, _ = press(saved, tea.KeyMsg{Type: tea.KeyDown})
+	saved, _ = press(saved, tea.KeyPressMsg{Code: tea.KeyDown})
+	saved, _ = press(saved, tea.KeyPressMsg{Code: tea.KeyDown})
 	check("a saved row", saved, "new session → ~/projects/folio · ")
 
 	typing, _ := typeList(t, selectKey(t, m, runKey("roost")), "@lum")
@@ -466,7 +466,7 @@ func TestTheRuleNamesTheTarget(t *testing.T) {
 	typed, _ = typeList(t, typed, "and a prompt")
 	check("a token typed, a prompt after", typed, "new session → ~/projects/lumen · ")
 	// Text before it: prompt text, and the row again.
-	before, _ := press(typed, tea.KeyMsg{Type: tea.KeyHome})
+	before, _ := press(typed, tea.KeyPressMsg{Code: tea.KeyHome})
 	before, _ = typeList(t, before, "x ")
 	check("text before the token", before, "new session → ~/projects/roost · ")
 
@@ -480,7 +480,7 @@ func TestTheRuleNamesTheTarget(t *testing.T) {
 	check("a path relative to here", rel, "new session → ~/projects/craze/docs · ")
 	// esc on a token still being typed: finished as far as the rule goes.
 	hidden, _ := typeList(t, m, "@shed")
-	hidden, _ = press(hidden, tea.KeyMsg{Type: tea.KeyEsc})
+	hidden, _ = press(hidden, tea.KeyPressMsg{Code: tea.KeyEsc})
 	check("a token whose popup esc hid", hidden, "new session → ~/projects/shed · ")
 }
 
@@ -517,16 +517,16 @@ func TestAPickBindsAndAnEditDropsTheBinding(t *testing.T) {
 	}
 
 	// An edit inside the token: unbound, and the name is now two directories.
-	edited, _ := press(m, tea.KeyMsg{Type: tea.KeyHome})
+	edited, _ := press(m, tea.KeyPressMsg{Code: tea.KeyHome})
 	for range 3 {
-		edited, _ = press(edited, tea.KeyMsg{Type: tea.KeyRight})
+		edited, _ = press(edited, tea.KeyPressMsg{Code: tea.KeyRight})
 	}
-	edited, _ = press(edited, tea.KeyMsg{Type: tea.KeyBackspace})
+	edited, _ = press(edited, tea.KeyPressMsg{Code: tea.KeyBackspace})
 	edited, _ = typeList(t, edited, "u")
 	if v, _ := inputOf(edited); v != "@lumen hi" || edited.sessList.in.bound != "" {
 		t.Fatalf("edited to %q, bound %q", v, edited.sessList.in.bound)
 	}
-	edited, _ = press(edited, tea.KeyMsg{Type: tea.KeyEnd})
+	edited, _ = press(edited, tea.KeyPressMsg{Code: tea.KeyEnd})
 	edited, _ = press(edited, enter())
 	if !strings.Contains(sessHint(edited), "@lumen names 2 directories") || len(fs.opened()) != 0 {
 		t.Fatalf("enter on an ambiguous name: %q", sessHint(edited))
@@ -534,22 +534,22 @@ func TestAPickBindsAndAnEditDropsTheBinding(t *testing.T) {
 
 	// Deleting it drops the binding too, and typing it again does not bring
 	// the binding back.
-	gone, _ := press(m, tea.KeyMsg{Type: tea.KeyCtrlU})
+	gone, _ := press(m, tea.KeyPressMsg{Code: 'u', Mod: tea.ModCtrl})
 	gone, _ = typeList(t, gone, "@lumen hi")
 	if gone.sessList.in.bound != "" {
 		t.Fatalf("a deleted token's binding came back: %q", gone.sessList.in.bound)
 	}
 
 	// Picking one of the two writes its path, and binds it.
-	twins, _ := press(m, tea.KeyMsg{Type: tea.KeyCtrlU})
+	twins, _ := press(m, tea.KeyPressMsg{Code: 'u', Mod: tea.ModCtrl})
 	twins, _ = typeList(t, twins, "@lumen")
 	names := popupNames(twins.sessList.in.at)
 	if !slices.Equal(names[:2], []string{"lumen", "lumen"}) {
 		t.Fatalf("the two lumens: %v", names)
 	}
-	twins, _ = press(twins, tea.KeyMsg{Type: tea.KeyDown})
+	twins, _ = press(twins, tea.KeyPressMsg{Code: tea.KeyDown})
 	it, _ := twins.sessList.in.at.selected()
-	twins, _ = press(twins, tea.KeyMsg{Type: tea.KeyTab})
+	twins, _ = press(twins, tea.KeyPressMsg{Code: tea.KeyTab})
 	want := "@" + sessTilde(os.Getenv("HOME"), it.Value) + " "
 	if v, _ := inputOf(twins); v != want || twins.sessList.in.bound != it.Value {
 		t.Fatalf("picked the second lumen into %q (want %q), bound %q", v, want, twins.sessList.in.bound)
@@ -717,7 +717,7 @@ func TestBrowsingListsSubdirectories(t *testing.T) {
 	}
 	// tab descends: the popup stays, on what is inside.
 	cr, _ := typeList(t, b, "cr")
-	cr, cmd := press(cr, tea.KeyMsg{Type: tea.KeyTab})
+	cr, cmd := press(cr, tea.KeyPressMsg{Code: tea.KeyTab})
 	if v, _ := inputOf(cr); v != "@~/projects/craze/" || !cr.sessList.in.at.visible() {
 		t.Fatalf("tab on craze/: %q, visible %v", v, cr.sessList.in.at.visible())
 	}
@@ -727,7 +727,7 @@ func TestBrowsingListsSubdirectories(t *testing.T) {
 		t.Fatalf("~/projects/craze/: %v", got)
 	}
 	// enter picks, and binds.
-	cr, _ = press(cr, tea.KeyMsg{Type: tea.KeyDown})
+	cr, _ = press(cr, tea.KeyPressMsg{Code: tea.KeyDown})
 	cr, _ = press(cr, enter())
 	if v, _ := inputOf(cr); v != "@~/projects/craze/docs " || cr.sessList.in.bound != homePath("projects/craze/docs") || cr.sessList.in.at.visible() {
 		t.Fatalf("enter on docs/: %q, bound %q", v, cr.sessList.in.bound)
@@ -833,7 +833,7 @@ func TestAListingNoLongerAwaitedIsDropped(t *testing.T) {
 	// The token moves on: the first listing is cancelled, its answer dropped.
 	a, cmdA := typeList(t, m, "@~/")
 	for range 2 {
-		a, _ = press(a, tea.KeyMsg{Type: tea.KeyBackspace})
+		a, _ = press(a, tea.KeyPressMsg{Code: tea.KeyBackspace})
 	}
 	b, cmdB := typeList(t, a, "~/projects/")
 	msgA := listLoad(t, cmdA)
@@ -851,9 +851,9 @@ func TestAListingNoLongerAwaitedIsDropped(t *testing.T) {
 
 	// The list left and opened again: the old opening's answer is dropped.
 	c, cmdC := typeList(t, m, "@~/projects/")
-	c, _ = press(c, tea.KeyMsg{Type: tea.KeyEsc})
-	c, _ = press(c, tea.KeyMsg{Type: tea.KeyEsc})
-	c, _ = press(c, tea.KeyMsg{Type: tea.KeyEsc})
+	c, _ = press(c, tea.KeyPressMsg{Code: tea.KeyEsc})
+	c, _ = press(c, tea.KeyPressMsg{Code: tea.KeyEsc})
+	c, _ = press(c, tea.KeyPressMsg{Code: tea.KeyEsc})
 	if c.sessList.open {
 		t.Fatal("fixture: the list is still open")
 	}
@@ -939,7 +939,7 @@ func TestALongLineShowsAroundItsCursor(t *testing.T) {
 	if got := row(m); got != "❯ "+long[len(long)-37:]+" " {
 		t.Fatalf("typing at the end of a long line: %q", got)
 	}
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyHome})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyHome})
 	if got := row(m); got != "❯ "+long[:38] {
 		t.Fatalf("at the start of a long line: %q", got)
 	}
@@ -948,8 +948,8 @@ func TestALongLineShowsAroundItsCursor(t *testing.T) {
 	if err := os.MkdirAll(deep, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyCtrlU})
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyCtrlK})
+	m, _ = press(m, tea.KeyPressMsg{Code: 'u', Mod: tea.ModCtrl})
+	m, _ = press(m, tea.KeyPressMsg{Code: 'k', Mod: tea.ModCtrl})
 	m, _ = typeList(t, m, "@~/projects/a/very/deeply/nested/directory/for/lumen ")
 	rule := plain(m.sessTargetRule(60))
 	if !strings.HasPrefix(rule, "─ new session → …") || !strings.Contains(rule, "/for/lumen · cursor · Grok ─") || lipgloss.Width(rule) != 60 {
@@ -973,7 +973,7 @@ func TestTheListsListingIsCancelledOnEveryExit(t *testing.T) {
 			}
 			switch exit {
 			case "ctrl+d":
-				m, _ = press(m, tea.KeyMsg{Type: tea.KeyCtrlD})
+				m, _ = press(m, tea.KeyPressMsg{Code: 'd', Mod: tea.ModCtrl})
 				if !m.quitting || m.sessList.in.at.pending() {
 					t.Fatalf("ctrl+d: quitting %v, the popup still waits %v", m.quitting, m.sessList.in.at.pending())
 				}
@@ -1064,8 +1064,8 @@ func TestAPasteLandsWhereItWasAskedFor(t *testing.T) {
 	if v, _ := inputOf(m); v != "a prompt" || m.input.Value() != "a draft" {
 		t.Fatalf("the list's paste: input %q, composer %q", v, m.input.Value())
 	}
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 	if m.sessList.open || m.input.Value() != "a draft" {
 		t.Fatalf("back in the session: list open %v, composer %q", m.sessList.open, m.input.Value())
 	}
@@ -1089,12 +1089,12 @@ func TestAListPasteHeldAcrossAReopeningIsDropped(t *testing.T) {
 	m, fs, _ := newSessModel(t, 100, 30)
 	m = newList(t, m, fs)
 	shown, first := m.shownGen, m.sessList.gen
-	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyCtrlV})
+	m, cmd := press(m, tea.KeyPressMsg{Code: 'v', Mod: tea.ModCtrl})
 	held := mustCmd(t, cmd, "pasteFromClipboard")
 
 	// The read still out: esc on the empty input leaves the list, and ← on
 	// the empty composer opens it again.
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 	if m.sessList.open {
 		t.Fatal("esc on the empty input did not leave the list")
 	}
@@ -1114,7 +1114,7 @@ func TestAListPasteHeldAcrossAReopeningIsDropped(t *testing.T) {
 	}
 
 	// This opening's own paste lands in its input.
-	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyCtrlV})
+	m, cmd = press(m, tea.KeyPressMsg{Code: 'v', Mod: tea.ModCtrl})
 	tm, _ = m.Update(runWatched(t, mustCmd(t, cmd, "pasteFromClipboard")))
 	if v, _ := inputOf(tm.(Model)); v != "late text" {
 		t.Fatalf("the new opening's own paste: input %q", v)

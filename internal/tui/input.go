@@ -1,115 +1,175 @@
 package tui
 
 import (
-	"bytes"
 	"os"
+	"unicode/utf8"
+
+	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
+	"github.com/charmbracelet/x/ansi/parser"
+	"github.com/charmbracelet/x/term"
+	"github.com/rivo/uniseg"
+	"golang.org/x/sys/unix"
 )
 
-// shiftEnterSeqs are the two Shift+Enter sequences craze reads: xterm's
-// modifyOtherKeys form, which Ghostty — and Roost, built on libghostty — sends
-// for Shift+Enter whether or not the program asked for anything, and the kitty
-// keyboard protocol's form. A terminal that sends neither (most send a bare
-// \r, unless the program turns a keyboard protocol on or the user remaps the
-// key) gives craze no Shift+Enter to tell from Enter.
-var shiftEnterSeqs = [][]byte{[]byte("\x1b[27;2;13~"), []byte("\x1b[13;2u")}
-
-// The bracketed paste markers: what a terminal sends around pasted text once
-// the program turns bracketed paste on, as bubbletea does.
-var (
-	pasteStart = []byte("\x1b[200~")
-	pasteEnd   = []byte("\x1b[201~")
-)
-
-// shiftEnterInput is the terminal as bubbletea reads it, with each Shift+Enter
-// sequence typed made a ctrl+j (\n) before bubbletea parses it: ctrl+j is the
-// newline key everything that reads one (isNewlineKey, the textarea's
-// InsertNewline) already takes, so Shift+Enter does what ctrl+j does,
-// wherever the keyboard is.
-//
-// bubbletea v1 has no Shift+Enter key. It reports a CSI sequence it does not
-// know as an unexported message and makes no key of it, so the key was lost
-// without a trace. That message cannot be caught on its way to Update instead:
-// its bytes are a slice of the read loop's one buffer (bubbletea key.go
-// readAnsiInputs), which the next read overwrites as soon as the message is
-// handed over — before Update has necessarily looked at it.
-//
-// Raw mode and cancelreader still see the terminal: bubbletea puts the
-// descriptor in raw mode and restores it (tty_unix.go), and cancelreader waits
-// on it with epoll or kqueue before it calls Read. tea.ExecProcess would not:
-// os/exec hands a child's stdin through a pipe unless it is an *os.File, so a
-// command run that way must be given os.Stdin itself.
-type shiftEnterInput struct {
-	f *os.File
-	// pasting is whether the bytes read so far leave a bracketed paste open:
-	// a paste is text, and its bytes reach bubbletea as they were pasted.
-	pasting bool
-	// recent is the last len(pasteStart) bytes passed on, across reads, so a
-	// marker a read cut in two is still seen; a rewritten Shift+Enter counts
-	// as the \n bubbletea gets for it.
-	recent [6]byte
+// Bubble Tea's decoder consumes printable ASCII before it checks for a
+// grapheme. For example, it would deliver a keycap one as the permission
+// shortcut "1", followed by its combining marks. Send an ASCII-led composed
+// character as one literal text insertion. A plain shortcut is immediate.
+// Escape sequences and existing bracketed pastes pass through untouched.
+type graphemeInput struct {
+	*os.File
+	parser     ansi.Parser
+	pasting    bool
+	endMatch   int
+	mouseBytes int
+	tail       []byte
 }
 
-func (in *shiftEnterInput) Read(p []byte) (int, error) {
-	n, err := in.f.Read(p)
-	if n > 0 {
-		// A read that filled p is passed on whole. It may end partway into a
-		// key's sequence, which bubbletea finishes only when the read was
-		// full (canHaveMoreData); shortening it would tell bubbletea the read
-		// ended on a key's boundary when it may not have. Such a read is input
-		// that piled up faster than craze took it, so a Shift+Enter inside
-		// one, like one a read cut in two, is lost as it always was.
-		n = in.rewrite(p[:n], n < len(p))
+const (
+	pasteStart = "\x1b[200~"
+	pasteEnd   = "\x1b[201~"
+)
+
+func terminalInput() (*graphemeInput, func(), error) {
+	if term.IsTerminal(os.Stdin.Fd()) {
+		return newGraphemeInput(os.Stdin), func() {}, nil
 	}
-	return n, err
+	// Mirror Bubble Tea's default when stdin is redirected. The controlling
+	// terminal needs the same input semantics as a terminal on stdin.
+	in, out, err := tea.OpenTTY()
+	if err != nil {
+		return nil, nil, err
+	}
+	_ = out.Close()
+	return newGraphemeInput(in), func() { _ = in.Close() }, nil
 }
 
-func (in *shiftEnterInput) Write(p []byte) (int, error) { return in.f.Write(p) }
-func (in *shiftEnterInput) Close() error                { return in.f.Close() }
-func (in *shiftEnterInput) Fd() uintptr                 { return in.f.Fd() }
-func (in *shiftEnterInput) Name() string                { return in.f.Name() }
+func newGraphemeInput(f *os.File) *graphemeInput {
+	in := &graphemeInput{File: f}
+	// Two parameters distinguish an exact bracketed-paste opener from a
+	// modified CSI key. OSC and DCS payloads never need to be stored.
+	in.parser.SetParamsSize(2)
+	in.parser.SetHandler(ansi.Handler{HandleCsi: in.handleCSI})
+	return in
+}
 
-// rewrite replaces each Shift+Enter sequence in b that is outside a paste
-// with \n, in place, when may, and returns the length left. It follows the
-// paste markers whether or not it may rewrite, so a read passed on whole
-// still moves a paste's state.
-func (in *shiftEnterInput) rewrite(b []byte, may bool) int {
-	n := 0
-	for i := 0; i < len(b); {
-		if may && !in.pasting && b[i] == 0x1b {
-			if l := shiftEnterAt(b[i:]); l > 0 {
-				in.see('\n')
-				b[n] = '\n'
-				n++
-				i += l
+func (in *graphemeInput) handleCSI(cmd ansi.Cmd, params ansi.Params) {
+	switch cmd {
+	case 'M':
+		// An X10 mouse report follows CSI M with three opaque bytes.
+		if len(params) == 0 {
+			in.mouseBytes = 3
+		}
+	case '~':
+		in.pasting = len(params) == 1 && params[0] == 200
+	}
+}
+
+func (in *graphemeInput) Read(p []byte) (int, error) {
+	// The shortest affected cluster is three bytes; its two markers add
+	// twelve. Reserve the maximum expansion in this read, so cancelreader
+	// can continue to poll the underlying terminal before every Read.
+	room := len(p) / 5
+	if room <= utf8.UTFMax {
+		// The terminal scanner supplies a 4 KiB buffer. Honour smaller
+		// buffers too, without replaying a held suffix out of order.
+		if len(in.tail) > 0 {
+			n := copy(p, in.tail)
+			in.tail = in.tail[n:]
+			return n, nil
+		}
+		return in.File.Read(p)
+	}
+	raw := p[len(p)-room:]
+	held := copy(raw, in.tail)
+	in.tail = in.tail[:0]
+	n, err := in.File.Read(raw[held:])
+	n += held
+	if n == room {
+		// Keep a possible ASCII base with the start of its UTF-8 mark
+		// when more of this burst is queued. A standalone shortcut never
+		// has to wait for the next keystroke.
+		start := asciiBaseAtEnd(raw[:n])
+		if start < n && in.hasMore() {
+			in.tail = append(in.tail, raw[start:n]...)
+			n = start
+		}
+	}
+	return len(in.literalClusters(p[:0], raw[:n])), err
+}
+
+// asciiBaseAtEnd finds a printable ASCII byte followed by no bytes or by an
+// incomplete UTF-8 encoding. A complete non-ASCII rune is already available
+// to the grapheme parser.
+func asciiBaseAtEnd(raw []byte) int {
+	for i := len(raw) - 1; i >= max(0, len(raw)-utf8.UTFMax); i-- {
+		if raw[i] < utf8.RuneSelf {
+			if raw[i] >= ' ' && raw[i] < 0x7f && (i+1 == len(raw) || !utf8.FullRune(raw[i+1:])) {
+				return i
+			}
+			break
+		}
+	}
+	return len(raw)
+}
+
+func (in *graphemeInput) hasMore() bool {
+	fds := []unix.PollFd{{Fd: int32(in.Fd()), Events: unix.POLLIN}}
+	for {
+		n, err := unix.Poll(fds, 0)
+		if err != unix.EINTR {
+			return err == nil && n > 0 && fds[0].Revents&unix.POLLIN != 0
+		}
+	}
+}
+
+func (in *graphemeInput) literalClusters(out, raw []byte) []byte {
+	for len(raw) > 0 {
+		// An X10 mouse report follows CSI M with three opaque bytes.
+		// Its button/coordinate bytes can look exactly like composed text.
+		if in.mouseBytes > 0 {
+			n := min(in.mouseBytes, len(raw))
+			out = append(out, raw[:n]...)
+			raw = raw[n:]
+			in.mouseBytes -= n
+			continue
+		}
+		if in.pasting {
+			b := raw[0]
+			raw = raw[1:]
+			out = append(out, b)
+			if b == pasteEnd[in.endMatch] {
+				in.endMatch++
+				if in.endMatch == len(pasteEnd) {
+					in.pasting = false
+					in.endMatch = 0
+				}
+			} else {
+				in.endMatch = 0
+				if b == pasteEnd[0] {
+					in.endMatch = 1
+				}
+			}
+			continue
+		}
+		// The ordinary keyboard path is a cheap ASCII test. Grapheme
+		// segmentation is only needed when a non-ASCII rune follows.
+		if in.parser.State() == parser.GroundState && raw[0] >= ' ' && raw[0] < 0x7f && len(raw) > 1 && raw[1] >= utf8.RuneSelf {
+			cluster, _, _, _ := uniseg.FirstGraphemeCluster(raw, -1)
+			if len(cluster) > 1 {
+				out = append(out, pasteStart...)
+				out = append(out, cluster...)
+				out = append(out, pasteEnd...)
+				raw = raw[len(cluster):]
 				continue
 			}
 		}
-		in.see(b[i])
-		b[n] = b[i]
-		n++
-		i++
+		// The streaming parser remembers the kind of control string between
+		// reads, including an OSC terminated by BEL in a later read.
+		in.parser.Advance(raw[0])
+		out = append(out, raw[0])
+		raw = raw[1:]
 	}
-	return n
-}
-
-// see moves the paste state on by one byte read.
-func (in *shiftEnterInput) see(c byte) {
-	copy(in.recent[:], in.recent[1:])
-	in.recent[len(in.recent)-1] = c
-	switch {
-	case bytes.Equal(in.recent[:], pasteStart):
-		in.pasting = true
-	case bytes.Equal(in.recent[:], pasteEnd):
-		in.pasting = false
-	}
-}
-
-// shiftEnterAt is the length of the Shift+Enter sequence b starts with, or 0.
-func shiftEnterAt(b []byte) int {
-	for _, seq := range shiftEnterSeqs {
-		if bytes.HasPrefix(b, seq) {
-			return len(seq)
-		}
-	}
-	return 0
+	return out
 }

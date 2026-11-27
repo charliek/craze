@@ -10,6 +10,12 @@ first release's. Whatever the version, [upgrading
 while sessions run](#upgrading-while-sessions-run) says what an upgrade does
 to the hub and the sessions already running.
 
+## Terminal keyboard input
+
+Craze now asks compatible terminals to report modified keys. `Shift+Enter`
+inserts a newline when the terminal reports Shift. If the terminal sends a
+plain Enter, use `Ctrl+J` to insert a newline.
+
 ## Transcript layouts and themes
 
 A new terminal starts in Grouped layout. Press `F2` to cycle through Compact

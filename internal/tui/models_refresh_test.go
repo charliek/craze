@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/backend"
@@ -73,7 +73,7 @@ func refreshModel(t *testing.T, plain bool) (Model, *Stub, *refreshCounter, stri
 func saveGamma(t *testing.T, m Model, stub *Stub) Model {
 	t.Helper()
 	m, _ = typeCommand(t, m, "/connect")
-	m = pressKey(t, m, tea.KeyEnter)
+	m = pressKey(t, m, "enter")
 	tm, _ := m.Update(pasteKey(connectCanary))
 	m, _ = press(tm.(Model), enter())
 	return feed(t, m, stubDeltas(t, stub)...)
@@ -223,7 +223,7 @@ func TestModelOpenAsksForARefresh(t *testing.T) {
 	if notes := texts(m, entryNote); len(notes) != 0 {
 		t.Fatalf("opening /model wrote notes %q", notes)
 	}
-	m = pressKey(t, m, tea.KeyEsc)
+	m = pressKey(t, m, "esc")
 	m, _ = typeCommand(t, m, "/model")
 	if count.calls.Load() != 2 {
 		t.Fatalf("a second opening asked %d times in all, want 2", count.calls.Load())
@@ -241,7 +241,7 @@ func TestTheModelDialogKeepsItsSelectionWhenModelsAreAdded(t *testing.T) {
 	m = feed(t, m, stubDeltas(t, stub)...)
 	m, _ = typeCommand(t, m, "/model")
 	m = feed(t, m, stubDeltas(t, stub)...)
-	m = pressKey(t, m, tea.KeyDown)
+	m = pressKey(t, m, "down")
 	sel := func() string { return m.dialogModelList()[m.mdlg.sel].ID }
 	before := sel()
 	// A model arrives that sorts ahead of the selection.

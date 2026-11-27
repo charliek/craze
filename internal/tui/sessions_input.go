@@ -9,11 +9,10 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/charmbracelet/bubbles/cursor"
-	"github.com/charmbracelet/bubbles/key"
-	"github.com/charmbracelet/bubbles/textinput"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/key"
+	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/charliek/craze/internal/sessions"
 )
@@ -127,7 +126,9 @@ func newSessInput(loads *completeLoadSet) sessInput {
 	ti.Prompt = ""
 	// A static cursor starts no blink timer nothing would route back, and
 	// keeps a frame deterministic (the model dialog's filter does the same).
-	ti.Cursor.SetMode(cursor.CursorStatic)
+	styles := ti.Styles()
+	styles.Cursor.Blink = false
+	ti.SetStyles(styles)
 	// ctrl+v is the list's own paste (the clipboard read every paste in
 	// craze goes through); the textinput's would answer a message only it
 	// knows, which the list never hands it.
@@ -273,14 +274,15 @@ func (in *sessInput) set(value string, cur int) {
 // popup's keys while it is up, then the input's own. handled false leaves
 // the key to the list (handleSessionsKey), as PR 2 had it: ctrl+d, ctrl+c,
 // ctrl+s, ctrl+x, ↑/↓, and esc, ←, → and enter while nothing is typed.
-func (m Model) sessInputKey(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
+func (m Model) sessInputKey(msg keyInput) (Model, tea.Cmd, bool) {
+	binding := shortcut(msg)
 	in := &m.sessList.in
 	if in.dispatching != 0 {
 		// Starting: the list's own keys are the list's — esc and ← leave it,
 		// the dispatch going on without it — and every other key, enter's
 		// second press among them, does nothing (§3.13).
-		switch msg.Type {
-		case tea.KeyCtrlD, tea.KeyCtrlC, tea.KeyCtrlS, tea.KeyCtrlX, tea.KeyUp, tea.KeyDown, tea.KeyEsc, tea.KeyLeft:
+		switch binding {
+		case "ctrl+d", "ctrl+c", "ctrl+s", "ctrl+x", "up", "down", "esc", "left":
 			return m, nil, false
 		}
 		return m, nil, true
@@ -311,7 +313,7 @@ func (m Model) sessInputKey(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 			}
 			// A value is applied, /exit quits (sessCmdChosen); anything
 			// else is written, as the `@` popup's choices are.
-			if next, cmd, ok := m.sessCmdChosen(msg.Type, choice.item); ok {
+			if next, cmd, ok := m.sessCmdChosen(binding, choice.item); ok {
 				return next, cmd, true
 			}
 			in.set(choice.value, choice.cursor)
@@ -320,29 +322,29 @@ func (m Model) sessInputKey(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 		}
 	}
 	empty := strings.TrimSpace(in.ti.Value()) == ""
-	switch msg.Type {
-	case tea.KeyCtrlD, tea.KeyCtrlC, tea.KeyCtrlS, tea.KeyCtrlX, tea.KeyUp, tea.KeyDown:
+	switch binding {
+	case "ctrl+d", "ctrl+c", "ctrl+s", "ctrl+x", "up", "down":
 		return m, nil, false
-	case tea.KeyEsc:
+	case "esc":
 		if in.ti.Value() == "" {
 			return m, nil, false
 		}
 		in.set("", 0)
 		sync := m.syncSessInput()
 		return m, sync, true
-	case tea.KeyLeft, tea.KeyRight:
-		if in.ti.Value() == "" && !msg.Alt {
+	case "left", "right":
+		if in.ti.Value() == "" {
 			return m, nil, false
 		}
-	case tea.KeyEnter:
+	case "enter":
 		if empty {
 			return m, nil, false
 		}
 		return m.sessInputEnter()
-	case tea.KeyTab:
+	case "tab":
 		// Nothing to complete: tab never submits (§3.15).
 		return m, nil, true
-	case tea.KeyCtrlV:
+	case "ctrl+v":
 		return m, pasteFromClipboard(m.shownGen, m.sessList.gen), true
 	}
 	before, pos := in.ti.Value(), in.ti.Position()
@@ -365,7 +367,7 @@ func (m Model) sessInputPaste(text string) (Model, tea.Cmd) {
 		return m, nil
 	}
 	var cmd tea.Cmd
-	in.ti, cmd = in.ti.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(text), Paste: true})
+	in.ti, cmd = in.ti.Update(tea.PasteMsg{Content: text})
 	sync := m.syncSessInput()
 	return m, tea.Batch(cmd, sync)
 }

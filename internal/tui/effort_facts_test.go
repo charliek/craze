@@ -7,11 +7,11 @@ import (
 	"testing"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/control"
 	"github.com/charliek/craze/internal/engine"
 	"github.com/charliek/craze/internal/harness"
-	tea "github.com/charmbracelet/bubbletea"
 )
 
 // The effort facts in the TUI's reads (plan 047 D2, §7 A2): the engine

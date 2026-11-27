@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/backend"
@@ -372,7 +372,7 @@ func TestAStaleEndingSettlesNothing(t *testing.T) {
 			// A confirm is up, so "the turn ended first" has something to clear
 			// if it wrongly settles.
 			m.input.SetValue("PINEAPPLE")
-			m = pumpKey(t, m, tea.KeyMsg{Type: tea.KeyCtrlL})
+			m = pumpKey(t, m, tea.KeyPressMsg{Code: 'l', Mod: tea.ModCtrl})
 			if m.confirm == nil {
 				t.Fatalf("setup: no confirm:\n%s", plainView(m))
 			}
@@ -592,7 +592,7 @@ func TestASuccessorStartedBehindTheDisplayedTurnIsNotAppliedEarly(t *testing.T) 
 			start: func(t *testing.T, m Model) Model {
 				t.Helper()
 				m.input.SetValue("B")
-				m = pumpKey(t, m, tea.KeyMsg{Type: tea.KeyCtrlL})
+				m = pumpKey(t, m, tea.KeyPressMsg{Code: 'l', Mod: tea.ModCtrl})
 				if m.confirm == nil {
 					t.Fatalf("cursor asks first:\n%s", plainView(m))
 				}
@@ -675,7 +675,7 @@ func TestAnEnginesFailedCancelIsReportedWithNoArmLeft(t *testing.T) {
 	held := scriptHeld()
 	m = startScripted(t, m, sess, "go", held)
 	m.input.SetValue("PINEAPPLE")
-	m = pumpKey(t, m, tea.KeyMsg{Type: tea.KeyCtrlL})
+	m = pumpKey(t, m, tea.KeyPressMsg{Code: 'l', Mod: tea.ModCtrl})
 	release := sess.HoldNextCancel()
 	sess.FailNextCancel(errors.New("nope"))
 	m = pumpKey(t, m, enter())
@@ -685,7 +685,7 @@ func TestAnEnginesFailedCancelIsReportedWithNoArmLeft(t *testing.T) {
 	}
 
 	// Esc takes the send back while its cancel is still on its way.
-	m = pumpKey(t, m, tea.KeyMsg{Type: tea.KeyEsc})
+	m = pumpKey(t, m, tea.KeyPressMsg{Code: tea.KeyEsc})
 	if sendNowArmed(m) {
 		t.Fatal("Esc did not take the send back")
 	}
@@ -726,7 +726,7 @@ func TestAFailedClientCancelDrawsItsRowExactlyOnce(t *testing.T) {
 	// A send-now armed against the same turn, so the failed cancel has a send to
 	// disarm as well as a caller to answer.
 	m.input.SetValue("PINEAPPLE")
-	m = pumpKey(t, m, tea.KeyMsg{Type: tea.KeyCtrlL})
+	m = pumpKey(t, m, tea.KeyPressMsg{Code: 'l', Mod: tea.ModCtrl})
 	m = pumpKey(t, m, enter())
 	if !sendNowArmed(m) {
 		t.Fatalf("setup: nothing armed:\n%s", plainView(m))
@@ -783,7 +783,7 @@ func TestEveryFailedCancelDrawsExactlyOneRow(t *testing.T) {
 				m = pumpEsc(t, m)
 				awaitBarrier(t, sess.Cancels(), "the client's cancel reaching the session")
 				m.input.SetValue("PINEAPPLE")
-				m = pumpKey(t, m, tea.KeyMsg{Type: tea.KeyCtrlL})
+				m = pumpKey(t, m, tea.KeyPressMsg{Code: 'l', Mod: tea.ModCtrl})
 				return pumpKey(t, m, enter()), release
 			},
 		},
@@ -792,7 +792,7 @@ func TestEveryFailedCancelDrawsExactlyOneRow(t *testing.T) {
 			arrange: func(t *testing.T, m Model, sess *scriptedSession) (Model, func()) {
 				t.Helper()
 				m.input.SetValue("PINEAPPLE")
-				m = pumpKey(t, m, tea.KeyMsg{Type: tea.KeyCtrlL})
+				m = pumpKey(t, m, tea.KeyPressMsg{Code: 'l', Mod: tea.ModCtrl})
 				release := sess.HoldNextCancel()
 				sess.FailNextCancel(errors.New("nope"))
 				return pumpKey(t, m, enter()), release
@@ -803,12 +803,12 @@ func TestEveryFailedCancelDrawsExactlyOneRow(t *testing.T) {
 			arrange: func(t *testing.T, m Model, sess *scriptedSession) (Model, func()) {
 				t.Helper()
 				m.input.SetValue("PINEAPPLE")
-				m = pumpKey(t, m, tea.KeyMsg{Type: tea.KeyCtrlL})
+				m = pumpKey(t, m, tea.KeyPressMsg{Code: 'l', Mod: tea.ModCtrl})
 				release := sess.HoldNextCancel()
 				sess.FailNextCancel(errors.New("nope"))
 				m = pumpKey(t, m, enter())
 				awaitBarrier(t, sess.Cancels(), "the arm's cancel reaching the session")
-				return pumpKey(t, m, tea.KeyMsg{Type: tea.KeyEsc}), release
+				return pumpKey(t, m, tea.KeyPressMsg{Code: tea.KeyEsc}), release
 			},
 		},
 	} {
@@ -855,7 +855,7 @@ func TestALateSendNowStartedDoesNotTakeANewerDraft(t *testing.T) {
 	// B is confirmed as a send-now in the window where the engine is already idle,
 	// so it starts at once: the pending successor, with its started still to come.
 	m.input.SetValue("B")
-	m = pumpKey(t, m, tea.KeyMsg{Type: tea.KeyCtrlL})
+	m = pumpKey(t, m, tea.KeyPressMsg{Code: 'l', Mod: tea.ModCtrl})
 	m = pumpKey(t, m, enter())
 	if m.input.Value() != "" {
 		t.Fatalf("setup: B was accepted, so the draft went: %q", m.input.Value())
@@ -867,7 +867,7 @@ func TestALateSendNowStartedDoesNotTakeANewerDraft(t *testing.T) {
 	// that arm asks for is held, which is what keeps B running while the schedule
 	// is set up: released, it would end B and fire C at once.
 	m.input.SetValue("C")
-	m = pumpKey(t, m, tea.KeyMsg{Type: tea.KeyCtrlL})
+	m = pumpKey(t, m, tea.KeyPressMsg{Code: 'l', Mod: tea.ModCtrl})
 	if m.confirm == nil {
 		t.Fatalf("setup: no confirm for C:\n%s", plainView(m))
 	}
@@ -953,11 +953,11 @@ func TestSendingAQueuedRowKeepsAnIdenticalDraft(t *testing.T) {
 	}
 	// An independent draft that reads exactly like the queued row.
 	m.input.SetValue("PINEAPPLE")
-	m = pumpKey(t, m, tea.KeyMsg{Type: tea.KeyUp})
+	m = pumpKey(t, m, tea.KeyPressMsg{Code: tea.KeyUp})
 	if !m.queueFocus {
 		t.Fatalf("setup: ↑ did not reach the band:\n%s", plainView(m))
 	}
-	m = pumpKey(t, m, tea.KeyMsg{Type: tea.KeyCtrlL})
+	m = pumpKey(t, m, tea.KeyPressMsg{Code: 'l', Mod: tea.ModCtrl})
 	m = pumpKey(t, m, enter())
 
 	awaitBarrier(t, sent.opened, "the row's turn opening")
@@ -1054,7 +1054,7 @@ func TestEchoRuleAnArmedSendDrawsItsRowWhenItFires(t *testing.T) {
 			m = startScripted(t, m, sess, "go", first)
 			sess.Script(sent)
 			m.input.SetValue("PINEAPPLE")
-			m = pumpKey(t, m, tea.KeyMsg{Type: tea.KeyCtrlL})
+			m = pumpKey(t, m, tea.KeyPressMsg{Code: 'l', Mod: tea.ModCtrl})
 			release := sess.HoldNextCancel()
 			m = pumpKey(t, m, enter())
 			awaitBarrier(t, sess.Cancels(), "the arm's cancel reaching the session")
@@ -1093,7 +1093,7 @@ func TestEchoRuleAnArmedSendDrawsItsRowWhenItFires(t *testing.T) {
 func TestSendNowDeltasBecomeTheNotesTheyAlwaysWere(t *testing.T) {
 	t.Run("withdrawn says it once", func(t *testing.T) {
 		m, _ := armedSendNow(t, "PINEAPPLE")
-		m = pumpKey(t, m, tea.KeyMsg{Type: tea.KeyEsc})
+		m = pumpKey(t, m, tea.KeyPressMsg{Code: tea.KeyEsc})
 		if !strings.Contains(plainView(m), "send now dropped") {
 			t.Fatalf("Esc says it in its own Update:\n%s", plainView(m))
 		}
@@ -1116,9 +1116,9 @@ func TestSendNowDeltasBecomeTheNotesTheyAlwaysWere(t *testing.T) {
 		m = pumpEnter(t, m, "PINEAPPLE")
 		m = pumpEnter(t, m, "MANGO")
 		// Arm the first row, then take it away underneath the arm.
-		m = pumpKey(t, m, tea.KeyMsg{Type: tea.KeyUp})
-		m = pumpKey(t, m, tea.KeyMsg{Type: tea.KeyUp})
-		m = pumpKey(t, m, tea.KeyMsg{Type: tea.KeyCtrlL})
+		m = pumpKey(t, m, tea.KeyPressMsg{Code: tea.KeyUp})
+		m = pumpKey(t, m, tea.KeyPressMsg{Code: tea.KeyUp})
+		m = pumpKey(t, m, tea.KeyPressMsg{Code: 'l', Mod: tea.ModCtrl})
 		release := sess.HoldNextCancel()
 		m = pumpKey(t, m, enter())
 		awaitBarrier(t, sess.Cancels(), "the arm's cancel reaching the session")

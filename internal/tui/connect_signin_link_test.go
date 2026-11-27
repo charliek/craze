@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/charliek/craze/internal/agent"
@@ -228,11 +228,11 @@ func withoutOSC8(s string) string {
 // frame with the address drawn plain, byte for byte. It answers the plan.
 func assertSignInFrame(t *testing.T, where string, m Model) signInPlan {
 	t.Helper()
-	view := m.View()
+	view := m.View().Content
 	if !m.cdlg.signIn.copied {
 		unlinked := m
 		unlinked.cdlg.signIn.link = ""
-		if withoutOSC8(view) != unlinked.View() {
+		if withoutOSC8(view) != unlinked.View().Content {
 			t.Fatalf("%s: the linked frame is more than the plain frame and its links", where)
 		}
 	}
@@ -367,7 +367,7 @@ func TestSignInLinkSurvivesEveryCut(t *testing.T) {
 			}
 		}
 	}
-	bg := selectionSeq(lipgloss.ColorProfile(), m.theme.SelectionBG)
+	bg := selectionSeq(m.theme.profile, m.theme.SelectionBG)
 	for full := 0; full <= r.X+r.W+3; full++ {
 		base := bg + styleFG(m.theme.Err).Render(strings.Repeat("x", full)) + ansi.ResetStyle
 		for i, line := range box {
@@ -409,8 +409,8 @@ func TestSignInLinksOverASelection(t *testing.T) {
 		t.Fatal("the reply closed the sign-in step")
 	}
 	m.sel = selection{on: true, anchor: cellPos{line: 0, col: 0}, head: cellPos{line: 1 << 20, col: m.width - 1}}
-	bg := selectionSeq(lipgloss.ColorProfile(), m.theme.SelectionBG)
-	if bg == "" || !strings.Contains(m.View(), bg) {
+	bg := selectionSeq(m.theme.profile, m.theme.SelectionBG)
+	if bg == "" || !strings.Contains(m.View().Content, bg) {
 		t.Fatal("the control: the frame has no selection highlight under the box")
 	}
 	assertSignInFrame(t, "a selection under the box", m)
@@ -428,8 +428,8 @@ func TestSignInLinksAcrossAResize(t *testing.T) {
 		if p := assertSignInFrame(t, where, m); addressRows(p) == 0 {
 			t.Fatalf("%s: the box draws no row of the address", where)
 		}
-		if m.cdlg.key.Width != dialogFieldWidth(m.lay.Dialog.W-dialogBorder) {
-			t.Fatalf("%s: the field is %d wide in a box %d wide", where, m.cdlg.key.Width, m.lay.Dialog.W)
+		if m.cdlg.key.Width() != dialogFieldWidth(m.lay.Dialog.W-dialogBorder) {
+			t.Fatalf("%s: the field is %d wide in a box %d wide", where, m.cdlg.key.Width(), m.lay.Dialog.W)
 		}
 	}
 }
@@ -470,8 +470,8 @@ func TestSignInPlainRows(t *testing.T) {
 				}
 				return f
 			})
-			m, _ = press(m, tea.KeyMsg{Type: tea.KeyCtrlY})
-			view := m.View()
+			m, _ = press(m, tea.KeyPressMsg{Code: 'y', Mod: tea.ModCtrl})
+			view := m.View().Content
 			if !tc.plain {
 				assertSignInFrame(t, tc.name, m)
 				if !m.cdlg.signIn.copied || !strings.Contains(plainView(m), "Cmd/Ctrl+click it") {
@@ -512,7 +512,7 @@ func TestSignInClickCopiesTheAddress(t *testing.T) {
 			for i, row := range p.rows {
 				// Each click on the step as it was drawn: the model is a
 				// value, so m is that step every time.
-				click := tea.MouseMsg{X: r.X + 1 + i%7, Y: r.Y + 1 + i, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress}
+				click := tea.MouseClickMsg{X: r.X + 1 + i%7, Y: r.Y + 1 + i, Button: tea.MouseLeft}
 				tm, cmd := m.Update(click)
 				got := tm.(Model)
 				if row.kind != signInRowAddress {
@@ -550,7 +550,7 @@ func TestSignInClickCopiesTheAddress(t *testing.T) {
 		r := m.lay.Dialog
 		p := m.signInPlan(r.W-dialogBorder, r.H-dialogBorder)
 		i := slices.IndexFunc(p.rows, func(r signInRow) bool { return r.kind == signInRowAddress })
-		tm, cmd := m.Update(tea.MouseMsg{X: r.X + 2, Y: r.Y + 1 + i, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+		tm, cmd := m.Update(tea.MouseClickMsg{X: r.X + 2, Y: r.Y + 1 + i, Button: tea.MouseLeft})
 		if cmd != nil || tm.(Model).cdlg.signIn.copied || len(rec.copies()) != 0 {
 			t.Fatal("with --no-mouse a click copied")
 		}
@@ -558,7 +558,7 @@ func TestSignInClickCopiesTheAddress(t *testing.T) {
 		if !strings.Contains(view, connectSignInWaitHintKeys) || strings.Contains(view, "click") {
 			t.Fatalf("with --no-mouse the footer offers a click:\n%s", view)
 		}
-		m, cmd = press(m, tea.KeyMsg{Type: tea.KeyCtrlY})
+		m, cmd = press(m, tea.KeyPressMsg{Code: 'y', Mod: tea.ModCtrl})
 		if _, ok := runCmd(cmd).(clipboardDoneMsg); !ok || len(rec.copies()) != 1 || rec.copies()[0] != signInURL {
 			t.Fatal("with --no-mouse Ctrl+Y did not copy the whole address")
 		}
@@ -595,12 +595,12 @@ func TestSignInCopiedLineLasts(t *testing.T) {
 		}
 		return out
 	}
-	m, first := press(m, tea.KeyMsg{Type: tea.KeyCtrlY})
+	m, first := press(m, tea.KeyPressMsg{Code: 'y', Mod: tea.ModCtrl})
 	firstTick := ticks(first)[0]
 	if !m.cdlg.signIn.copied || !strings.Contains(plainView(m), connectSignInCopiedLine) {
 		t.Fatalf("Ctrl+Y shows no copied line:\n%s", plainView(m))
 	}
-	m, second := press(m, tea.KeyMsg{Type: tea.KeyCtrlY})
+	m, second := press(m, tea.KeyPressMsg{Code: 'y', Mod: tea.ModCtrl})
 	secondTick := ticks(second)[0]
 	for _, stale := range []signInCopiedMsg{
 		firstTick,
@@ -617,7 +617,7 @@ func TestSignInCopiedLineLasts(t *testing.T) {
 		t.Fatal("the copy's own tick did not end the copied line")
 	}
 	// The next key ends it as well.
-	m = pressKey(t, m, tea.KeyRight)
+	m = pressKey(t, m, "right")
 	if m.cdlg.signIn.copied || strings.Contains(plainView(m), connectSignInCopiedLine) {
 		t.Fatal("the next key did not end the copied line")
 	}
@@ -744,7 +744,7 @@ func TestSignInShowsTheBrowsersReturnFromAnotherAttempt(t *testing.T) {
 
 	// Stale: another run of the step (Esc, and the plan picked again), and
 	// another opening of the box.
-	back := pressKey(t, m, tea.KeyEsc)
+	back := pressKey(t, m, "esc")
 	back, _ = beginStep(t, back)
 	reopened := back.closeDialog(true)
 	reopened, _ = typeCommand(t, reopened, "/connect")
@@ -1027,8 +1027,8 @@ func TestSignInRefusesToCopyAnAddressTooLong(t *testing.T) {
 			p := m.signInPlan(r.W-dialogBorder, r.H-dialogBorder)
 			i := slices.IndexFunc(p.rows, func(r signInRow) bool { return r.kind == signInRowAddress })
 			for _, how := range []tea.Msg{
-				tea.KeyMsg{Type: tea.KeyCtrlY},
-				tea.MouseMsg{X: r.X + 2, Y: r.Y + 1 + i, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress},
+				tea.KeyPressMsg{Code: 'y', Mod: tea.ModCtrl},
+				tea.MouseClickMsg{X: r.X + 2, Y: r.Y + 1 + i, Button: tea.MouseLeft},
 			} {
 				tm, cmd := m.Update(how)
 				got := tm.(Model)
@@ -1062,12 +1062,12 @@ func TestSignInRefusesToCopyAnAddressTooLong(t *testing.T) {
 func TestSignInCopiedLineEndsAtAnInterceptedKey(t *testing.T) {
 	captureCopies(t)
 	m, _ := signInStepAt(t, 100, 30, nil, false, listeningStandIn)
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyCtrlY})
+	m, _ = press(m, tea.KeyPressMsg{Code: 'y', Mod: tea.ModCtrl})
 	if !m.cdlg.signIn.copied || !strings.Contains(plainView(m), connectSignInCopiedLine) {
 		t.Fatal("the control: Ctrl+Y shows no copied line")
 	}
 	m.status = statusWorking
-	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	tm, _ := m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
 	m = tm.(Model)
 	if m.dialog != dialogConnect || m.cdlg.step != connectSignIn {
 		t.Fatal("Ctrl+C with work running closed the sign-in step")

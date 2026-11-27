@@ -21,6 +21,7 @@ from pathlib import Path
 
 import pytest
 from conftest import PS_TIMEOUT, both_modes, host_env_names, marker_pids, require_rg  # noqa: F401
+from pty_screen import TerminalScreen, TerminalStream
 from sse_fixture import (
     CANARY,
     UNUSED_ENV_KEY,
@@ -123,9 +124,13 @@ class PTYCraze:
     ) -> None:
         self.fake_agent_bin = fake_agent_bin
         self.buf = bytearray()
+        self._lock = threading.Lock()
+        self._frames: list[tuple[int, tuple[str, ...]]] = []
+        self._terminal = TerminalScreen(80, 24, self._record_screen)
+        self._stream = TerminalStream(self._terminal)
+        self._record_screen()
         self._closed = threading.Event()
         self._master_open = False
-        self._answers_queries = setctty
         self._answered_to = 0
         master, slave = _open_pty()
         _set_winsize(slave)
@@ -143,13 +148,10 @@ class PTYCraze:
         # Never inherited: a developer with CRAZE_FAKE_STEP exported would
         # otherwise change the timing of every case that did not ask for it.
         env.pop("CRAZE_FAKE_STEP", None)
-        # Nor CI. termenv reports "not a terminal" whenever CI is set
-        # (termenv.go isTTY), which drops the colour profile to Ascii, and
-        # craze paints no colour -- and sets no terminal colours -- when it
-        # cannot paint at all. This harness exists to drive craze the way a
-        # real terminal does, and a real terminal has no CI in its environment,
-        # so popping it is what makes a CI run behave like a developer's.
+        # Exercise a normal interactive terminal environment, including on CI.
         env.pop("CI", None)
+        env.pop("SSH_TTY", None)
+        env.pop("TERM_PROGRAM", None)
         # Nor any herdr or roost variable: craze reports its status to the host
         # those name, and this suite may be running inside a real one. conftest
         # already strips them from os.environ; this holds for a PTYCraze built
@@ -250,71 +252,78 @@ class PTYCraze:
             if not chunk:
                 break
             before = len(self.buf)
-            self.buf.extend(chunk)
-            if self._answers_queries:
-                # Back by one query's length less one: a query split across
-                # two reads is still found whole.
-                self._answer_queries(max(0, before - len(_CPR_QUERY) + 1))
+            with self._lock:
+                self.buf.extend(chunk)
+                self._stream.feed(chunk)
+                self._record_screen()
+            # Negotiate synchronized screen updates, including a request
+            # split between two PTY reads.
+            start = max(self._answered_to, before - len(_SYNC_QUERY) + 1)
+            query = self.buf.find(_SYNC_QUERY, start)
+            if query >= 0:
+                self._answered_to = query + len(_SYNC_QUERY)
+                try:
+                    os.write(self.master, _SYNC_REPLY)
+                except OSError:
+                    return
 
-    def _answer_queries(self, start: int) -> None:
-        """Answer the background-colour query the way a real terminal does.
+    def _record_screen(self) -> None:
+        if self._terminal.synchronized:
+            return
+        rows = tuple(row.rstrip() for row in self._terminal.display)
+        if not self._frames or rows != self._frames[-1][1]:
+            self._frames.append((len(self.buf), rows))
 
-        Only a craze that owns its terminal asks: termenv queries a tty only
-        when it is the foreground of its controlling one. It writes the OSC 11
-        query and then a cursor-position query, reads both answers in that
-        order, and waits five seconds for them before carrying on without.
-        Unanswered, every setctty run would start five seconds late.
-        """
-        start = max(start, self._answered_to)
-        while (i := self.buf.find(_CPR_QUERY, start)) >= 0:
-            reply = _CPR_REPLY
-            if self.buf.rfind(_BG_QUERY, self._answered_to, i) >= 0:
-                reply = _BG_REPLY + reply
-            self._answered_to = start = i + len(_CPR_QUERY)
-            try:
-                os.write(self.master, reply)
-            except OSError:
-                # craze is gone, and with it whoever asked.
-                return
+    def rows(self) -> tuple[str, ...]:
+        with self._lock:
+            return self._frames[-1][1]
 
     def screen(self) -> str:
+        return "\n".join(self.rows())
+
+    def history(self) -> str:
+        """Displayed screens, including ones removed by a redraw or exit."""
+        with self._lock:
+            return "\n".join(row for _, rows in self._frames for row in rows)
+
+    def raw_output(self) -> str:
         return bytes(self.buf).decode("utf-8", "replace")
 
     def mark(self) -> int:
-        """Offset into the accumulated output; pairs with wait_contains_since."""
-        return len(self.buf)
+        """Offset after all screen updates observed so far."""
+        with self._lock:
+            return len(self.buf)
 
     def wait_contains(self, needle: str, timeout: float = 10) -> str:
         return self._wait(needle, 0, timeout)
 
     def wait_contains_since(self, needle: str, mark: int, timeout: float = 10) -> str:
-        """wait_contains over bytes emitted after mark only.
-
-        The screen is accumulated history, so a plain wait_contains can pass
-        on bytes that painted long before the action under test. Scoping to
-        the mark makes the assertion about output the action caused.
-        """
+        """Wait for an occurrence that appeared on screen after the mark."""
         return self._wait(needle, mark, timeout)
 
     def _wait(self, needle: str, mark: int, timeout: float) -> str:
-        """Match against the output with terminal escapes stripped.
-
-        Adjacent spans carry their own SGR sequences, so a needle that
-        crosses a style boundary (`○ explore`: glyph then label) never
-        appears contiguously in the raw bytes.
-        """
         deadline = time.monotonic() + timeout
-        last = ""
+        pos = 0
+        previous: tuple[str, ...] = ()
         while time.monotonic() < deadline:
-            last = bytes(self.buf[mark:]).decode("utf-8", "replace")
-            if needle in _ANSI.sub("", last):
-                return last
-            if self.proc.poll() is not None:
+            with self._lock:
+                frames = self._frames[pos:]
+            pos += len(frames)
+            for offset, rows in frames:
+                if offset > mark:
+                    for y, row in enumerate(rows):
+                        start = row.find(needle)
+                        while start >= 0:
+                            if not previous or not previous[y].startswith(needle, start):
+                                return "\n".join(rows)
+                            start = row.find(needle, start + 1)
+                previous = rows
+            if self.proc.poll() is not None and not self._reader.is_alive():
                 raise AssertionError(
-                    f"craze exited {self.proc.returncode} before {needle!r}: {last[-3000:]}"
+                    f"craze exited {self.proc.returncode} before {needle!r}: {self.screen()}"
                 )
             time.sleep(0.05)
-        raise AssertionError(f"timeout waiting for {needle!r}: {last[-4000:]}")
+        raise AssertionError(f"timeout waiting for {needle!r}: {self.screen()}")
 
     def write(self, data: bytes) -> None:
         os.write(self.master, data)
@@ -389,16 +398,12 @@ class PTYCraze:
         self.close()
 
 
-# CSI, plus OSC: craze sets the terminal's own colours (OSC 11/10) and tab
-# title (OSC 2), and an OSC string left in the text would otherwise survive
-# into what wait_contains matches.
+# Strip terminal controls when checking the plain diagnostics printed on exit.
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
 
-# termenv's terminal queries and a dark terminal's answers to them.
-_BG_QUERY = b"\x1b]11;?"
-_CPR_QUERY = b"\x1b[6n"
-_BG_REPLY = b"\x1b]11;rgb:0000/0000/0000\x1b\\"
-_CPR_REPLY = b"\x1b[1;1R"
+# DECRQM/DECRPM for synchronized output (supported, currently reset).
+_SYNC_QUERY = b"\x1b[?2026$p"
+_SYNC_REPLY = b"\x1b[?2026;2$y"
 
 
 def _wait_fake_gone(fake_agent_bin: Path, timeout: float = 3) -> None:
@@ -432,7 +437,8 @@ def _wait_output(tui: PTYCraze, needle: str, timeout: float = 5, mark: int = 0) 
     deadline = time.monotonic() + timeout
     text = ""
     while time.monotonic() < deadline:
-        text = _ANSI.sub("", bytes(tui.buf[mark:]).decode("utf-8", "replace"))
+        output = bytes(tui.buf[mark:]).partition(b"\x1b[?1049l")
+        text = _ANSI.sub("", output[2].decode("utf-8", "replace"))
         if needle in text:
             return text
         time.sleep(0.05)
@@ -473,7 +479,7 @@ def test_tui_composer_at_mentions_a_file(
         tui.wait_contains_since("see @src/zyqx-notes.md", mark)
         tui.write(b"now\r")
         tui.wait_contains("echo: see @src/zyqx-notes.md now")
-        assert "never sent" not in _ANSI.sub("", tui.screen()), tui.screen()[-3000:]
+        assert "never sent" not in tui.history(), tui.screen()[-3000:]
         quit_craze(tui)
     _wait_fake_gone(fake_agent_bin)
 
@@ -481,8 +487,8 @@ def test_tui_composer_at_mentions_a_file(
 def test_tui_shift_enter_is_a_newline(
     craze_bin: Path, fake_agent_bin: Path, tmp_path: Path, both_modes: str
 ) -> None:
-    """Shift+Enter as Ghostty and Roost send it (xterm's `ESC[27;2;13~`, which
-    bubbletea v1 has no key for) and as the kitty keyboard protocol spells it
+    """Shift+Enter as Ghostty and Roost send it (xterm's `ESC[27;2;13~`) and
+    as the kitty keyboard protocol spells it
     (`ESC[13;2u`) is the composer's newline: the agent receives each pair of
     lines as one prompt, joined by a newline, exactly. A Shift+Enter dropped
     would send `alphabravo`, one taken for Enter `alpha` and `bravo` apart.
@@ -518,20 +524,9 @@ def test_tui_shift_enter_is_a_newline(
 def test_tui_help_esc_then_quit(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path, both_modes: str) -> None:
     with PTYCraze(craze_bin, fake_agent_bin, tmp_path) as tui:
         tui.wait_contains("cursor")
+        mark = tui.mark()
         tui.write(b"/help\r")
-        deadline = time.monotonic() + 10
-        text = ""
-        while time.monotonic() < deadline:
-            text = tui.screen()
-            if "shift+tab" in text or "/exit" in text:
-                break
-            if tui.proc.poll() is not None:
-                raise AssertionError(
-                    f"craze exited {tui.proc.returncode} during /help: {text[-3000:]}"
-                )
-            time.sleep(0.05)
-        else:
-            raise AssertionError(f"help overlay missing: {text[-4000:]}")
+        tui.wait_contains_since("sending and editing", mark)
         tui.write(b"\x1b")
         time.sleep(0.1)
         tui.write(b"\x04")
@@ -582,9 +577,10 @@ def test_tui_clean_exit_prints_no_agent_stderr(
         tui.wait_contains("echo: hello")
         quit_craze(tui)
     _wait_fake_gone(fake_agent_bin)
-    text = _ANSI.sub("", tui.screen())
+    text = tui.screen()
     assert "plugin dir skipped:" in text, text[-3000:]
-    assert canary not in text, text[-3000:]
+    assert canary not in tui.raw_output(), "agent stderr reached the terminal"
+    assert canary not in tui.history(), "agent stderr appeared on screen"
 
 
 def test_tui_authfail_prints_agent_stderr(
@@ -614,7 +610,7 @@ def test_tui_authfail_prints_agent_stderr(
         code = tui.wait_exit()
         assert code == 1, tui.screen()[-3000:]
     _wait_fake_gone(fake_agent_bin)
-    text = _ANSI.sub("", tui.screen())
+    text = tui.screen()
     assert canary in text, text[-3000:]
     assert "plugin dir skipped:" not in text, text[-3000:]
 
@@ -652,7 +648,7 @@ def test_tui_agent_death_prints_stderr_and_exits_clean(
         code = tui.wait_exit()
         assert code == 0, tui.screen()[-3000:]
     _wait_fake_gone(fake_agent_bin)
-    text = _ANSI.sub("", tui.screen())
+    text = tui.screen()
     assert canary in text, text[-3000:]
 
 
@@ -661,10 +657,8 @@ def test_tui_subagent_view_enter_esc(
 ) -> None:
     """Enter opens a sub-agent in the main area; Esc returns; nothing cancels.
 
-    The banner only paints while the view holds the main area. Esc's return
-    is proven by main-transcript bytes re-emitted after a mark taken inside
-    the view: the screen is accumulated history, so only output the return
-    itself caused counts.
+    The banner identifies the sub-agent view. Marking that screen before
+    Esc proves the main transcript becomes visible again.
     """
     with PTYCraze(
         craze_bin, fake_agent_bin, tmp_path, script="grok-subagent", provider="grok"
@@ -687,23 +681,11 @@ def _raw_since(tui: PTYCraze, mark: int) -> str:
     return bytes(tui.buf[mark:]).decode("utf-8", "replace")
 
 
-def _assert_mode_switch(raw: str, enable: str) -> None:
-    """Both disables, then the enable, in that order.
-
-    bubbletea's DisableMouse writes 1002l then 1003l; neither escape disables
-    the other, so a switch that skipped one would leave the previous mode on
-    and the assertion has to be about the order, not about presence.
-    """
-    cell_off = raw.find("\x1b[?1002l")
-    all_off = raw.find("\x1b[?1003l")
-    on = raw.find(enable)
-    assert cell_off >= 0, f"no 1002l before {enable!r}: {raw[-400:]!r}"
-    assert all_off >= 0, f"no 1003l before {enable!r}: {raw[-400:]!r}"
-    assert on >= 0, f"no {enable!r}: {raw[-400:]!r}"
-    assert cell_off < on and all_off < on, (
-        f"the disables must precede {enable!r}: "
-        f"1002l@{cell_off} 1003l@{all_off} enable@{on}"
-    )
+def _assert_mode_switch(raw: str, previous: int, current: int) -> None:
+    """The prior mouse tracking mode is disabled before the new one is enabled."""
+    off, on = f"\x1b[?{previous}l", f"\x1b[?{current}h"
+    assert off in raw and on in raw, repr(raw[-400:])
+    assert raw.index(off) < raw.index(on), repr(raw[-400:])
 
 
 def _wait_raw(tui: PTYCraze, needle: str, mark: int, timeout: float = 10) -> str:
@@ -748,8 +730,8 @@ def test_tui_queue_then_drain(craze_bin: Path, fake_agent_bin: Path, tmp_path: P
         tui.wait_contains_since("❯ Reply with PINEAPPLE", mark, timeout=30)
         tui.wait_contains_since("❯ Reply with MANGO", mark, timeout=30)
         tui.wait_contains_since("message  / for commands", mark, timeout=30)
-        screen = _ANSI.sub("", tui.screen())
-        assert "⧗ " not in screen.split("❯ Reply with MANGO")[-1], screen[-1500:]
+        screen = tui.screen()
+        assert "⧗ " not in screen, screen[-1500:]
         tui.write(b"\x04")
         assert tui.wait_exit() == 0, tui.screen()[-3000:]
     _wait_fake_gone(fake_agent_bin)
@@ -760,9 +742,8 @@ def test_tui_queue_switches_the_terminal_to_all_motion(
 ) -> None:
     """Hover needs motion reports with no button down.
 
-    1002 (cell motion) does not send them and 1003 (all motion) does, and
-    neither escape disables the other — so every transition goes through
-    1000l/1002l/1003l first. The terminal is where that is visible.
+    Mode 1003 sends hover reports. Check the terminal sees mode 1002
+    disabled before mode 1003 starts, and the reverse when the queue empties.
     """
     with PTYCraze(
         craze_bin, fake_agent_bin, tmp_path, script="long-turn", step="30s"
@@ -774,7 +755,7 @@ def test_tui_queue_switches_the_terminal_to_all_motion(
         tui.write(b"Reply with PINEAPPLE\r")
         tui.wait_contains_since("#1 Reply with PINEAPPLE", mark)
         got = _wait_raw(tui, "\x1b[?1003h", mark)
-        _assert_mode_switch(got, "\x1b[?1003h")
+        _assert_mode_switch(got, 1002, 1003)
 
         # The last row leaving puts cell motion back, the same way round.
         mark = tui.mark()
@@ -783,7 +764,7 @@ def test_tui_queue_switches_the_terminal_to_all_motion(
         mark = tui.mark()
         tui.write(b"\x7f")  # backspace cancels it
         got = _wait_raw(tui, "\x1b[?1002h", mark)
-        _assert_mode_switch(got, "\x1b[?1002h")
+        _assert_mode_switch(got, 1003, 1002)
         tui.write(b"\x03\x03")
         tui.wait_exit()
     _wait_fake_gone(fake_agent_bin)
@@ -860,7 +841,7 @@ def test_tui_continue_with_no_index_exits_1(
     ) as tui:
         code = tui.wait_exit(timeout=10)
         assert code == 1, tui.screen()[-3000:]
-        assert "no session to continue in" in _ANSI.sub("", tui.screen())
+        assert "no session to continue in" in tui.screen()
 
 
 def test_tui_continue_and_resume_exit_2(
@@ -872,43 +853,18 @@ def test_tui_continue_and_resume_exit_2(
     ) as tui:
         code = tui.wait_exit(timeout=10)
         assert code == 2, tui.screen()[-3000:]
-        assert "mutually exclusive" in _ANSI.sub("", tui.screen())
+        assert "mutually exclusive" in tui.screen()
 
 
-_OSC_SET_TOKYO = "\x1b]11;rgb:1a/1b/26\x07\x1b]10;rgb:b9/c1/e1\x07"
-_OSC_RESET = "\x1b]111\x07\x1b]110\x07"
-
-
-def _wait_raw_endswith(tui: PTYCraze, suffix: str, timeout: float = 5) -> str:
-    """wait for the raw output to *end* with a sequence.
-
-    Deliberately not _wait_raw: that one takes a mark and matches anywhere,
-    and it treats an exited process as a failure. The reset pair is written on
-    the way out, after bubbletea closes the alt screen, so the process having
-    exited is the normal case here -- and it has to be the *last* bytes on the
-    wire, which is the ordering this asserts.
-    """
-    deadline = time.monotonic() + timeout
-    raw = ""
-    while time.monotonic() < deadline:
-        raw = tui.screen()
-        if raw.endswith(suffix):
-            return raw
-        time.sleep(0.05)
-    raise AssertionError(f"output does not end with {suffix!r}: {raw[-400:]!r}")
+_OSC_SET_TOKYO = ("\x1b]10;#b9c1e1\x07", "\x1b]11;#1a1b26\x07")
+_OSC_RESET = ("\x1b]110\x07", "\x1b]111\x07")
 
 
 def test_tui_themes_the_terminal_colours_and_resets_them(
     craze_bin: Path, fake_agent_bin: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The themed background is a property of the terminal, not of a frame.
-
-    craze sets the terminal's own default background and foreground (OSC 11
-    and 10) from the theme before the first frame and hands them back (OSC 111
-    and 110) after bubbletea has restored everything else, so a pty is the
-    only place the whole lifecycle is visible. Every off switch — the flag,
-    `background = false`, and a profile with no colour at all — has to leave
-    all four of those sequences unwritten, not merely balance them.
+    """The renderer sets the theme’s defaults by the first frame and resets
+    them on exit. Every off switch leaves all four OSC sequences unwritten.
     """
     # The positive case exercises color even when the invoking shell disables it.
     monkeypatch.delenv("NO_COLOR", raising=False)
@@ -916,17 +872,17 @@ def test_tui_themes_the_terminal_colours_and_resets_them(
     workspace.mkdir()
     with PTYCraze(craze_bin, fake_agent_bin, workspace) as tui:
         tui.wait_contains("cursor")
-        raw = tui.screen()
-        assert _OSC_SET_TOKYO in raw, repr(raw[:400])
-        # Before the first frame: the pair precedes the alt screen bubbletea
-        # opens as its very first act.
-        assert "\x1b[?1049h" in raw, repr(raw[:400])
-        assert raw.index(_OSC_SET_TOKYO) < raw.index("\x1b[?1049h"), repr(raw[:400])
+        raw = tui.raw_output()
+        first_content = raw.index("cursor")
+        for command in _OSC_SET_TOKYO:
+            assert command in raw[:first_content], repr(raw[:400])
 
         os.killpg(tui.proc.pid, signal.SIGTERM)
         tui.wait_exit()
-        # Last thing out, after bubbletea's own restore and the title clear.
-        _wait_raw_endswith(tui, _OSC_RESET)
+        cleanup = tui.raw_output().split("\x1b[?1049l", 1)
+        assert len(cleanup) == 2, repr(tui.screen()[-400:])
+        for command in _OSC_RESET:
+            assert command in cleanup[1], repr(cleanup[1])
     _wait_fake_gone(fake_agent_bin)
 
     for name, extra_args, config, env_extra in (
@@ -934,7 +890,7 @@ def test_tui_themes_the_terminal_colours_and_resets_them(
         ("off-config", None, "background = false\n", None),
         # NO_COLOR drops the profile to Ascii: craze paints no SGR colour, so
         # it must not repaint the terminal either.
-        ("off-no-color", None, None, {"NO_COLOR": "1"}),
+        ("off-no-color", None, None, {"NO_COLOR": "yes-please"}),
     ):
         workspace = tmp_path / name
         workspace.mkdir()
@@ -953,7 +909,7 @@ def test_tui_themes_the_terminal_colours_and_resets_them(
             os.killpg(tui.proc.pid, signal.SIGTERM)
             tui.wait_exit()
             time.sleep(0.2)
-            raw = tui.screen()
+            raw = tui.raw_output()
             # None of OSC 10, 11, 110 or 111 — they all start "\x1b]1".
             assert "\x1b]1" not in raw, f"{name}: {raw[:400]!r} … {raw[-400:]!r}"
         _wait_fake_gone(fake_agent_bin)
@@ -1138,7 +1094,7 @@ def test_tui_control_socket_opt_out_still_claims_the_session(
         assert not (cache / "hosts").exists() or list((cache / "hosts").iterdir()) == []
         quit_craze(tui)
     _wait_fake_gone(fake_agent_bin)
-    assert "control socket" not in _ANSI.sub("", tui.screen())
+    assert "control socket" not in tui.history()
     assert not _lock_is_held(lock)
 
 
@@ -1184,7 +1140,7 @@ def test_tui_continue_twice_attaches_the_second(
             second.wait_contains("the workspace holds main.py and README.md")
             second.write(b"\x04")
             assert second.wait_exit(timeout=10) == 0, second.screen()[-3000:]
-            assert "session ended" not in _ANSI.sub("", second.screen())
+            assert "session ended" not in second.history()
         assert not argv_dump.exists(), "the attaching craze spawned an agent"
         assert first.proc.poll() is None, first.screen()[-3000:]
         first.write(b"\x04")
@@ -1225,7 +1181,7 @@ def test_tui_continue_of_a_session_serving_no_socket_refuses(
             env_extra={"CRAZE_FAKE_DUMP_ARGV": str(argv_dump)},
         ) as second:
             assert second.wait_exit(timeout=10) == 1, second.screen()[-3000:]
-            text = _ANSI.sub("", second.screen())
+            text = second.raw_output()
             want = (
                 f"craze: that session is already running (pid {first.proc.pid})"
                 " — it serves no control socket"
@@ -1279,8 +1235,9 @@ def test_tui_native_one_turn_persists_provider_and_indexes(
         # The configured key really went out, so its absence below means
         # something.
         assert any(CANARY in r.authorization for r in fixture.requests), fixture.requests
-        text = _ANSI.sub("", tui.screen())
-        assert CANARY not in text, text[-3000:]
+        text = tui.history()
+        assert CANARY not in tui.raw_output(), "provider credential reached the terminal"
+        assert CANARY not in text, "provider credential appeared on screen"
 
     assert config_path.read_text(encoding="utf-8") == 'provider = "native"\ntheme = "tokyo-night"\n'
     index = craze_home / "sessions.jsonl"
@@ -1363,8 +1320,9 @@ def test_tui_native_tool_loop_draws_its_rows(craze_bin: Path, tmp_path: Path) ->
         # something -- and no tool's output carried it back onto the screen.
         assert any(CANARY in r.authorization for r in fixture.requests), fixture.requests
         assert fixture.unscripted == 0
-        text = _ANSI.sub("", tui.screen())
-        assert CANARY not in text, text[-3000:]
+        text = tui.history()
+        assert CANARY not in tui.raw_output(), "provider credential reached the terminal"
+        assert CANARY not in text, "provider credential appeared on screen"
     assert (workspace / "notes.txt").read_text(encoding="utf-8") == "beta\n"
 
 

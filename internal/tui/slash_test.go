@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/charliek/craze/internal/agent"
 )
@@ -41,7 +41,7 @@ func slashScrolled(t *testing.T, n int) (Model, *Stub) {
 	m, stub := slashModel(t, 100, 30, lettered("cmd", 12)...)
 	m = draft(m, "see /cmd")
 	for i := 0; i < n; i++ {
-		m = pressKey(t, m, tea.KeyDown)
+		m = pressKey(t, m, "down")
 	}
 	return m, stub
 }
@@ -279,7 +279,7 @@ func TestAcceptSlashReplacesOnlyTheToken(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			m, _ := slashModel(t, 80, 30, "research")
 			m = caret(m, tc.value, tc.cursor)
-			m = pressKey(t, m, tea.KeyTab)
+			m = pressKey(t, m, "tab")
 			if m.input.Value() != tc.want {
 				t.Fatalf("draft %q, want %q", m.input.Value(), tc.want)
 			}
@@ -322,7 +322,7 @@ func TestAcceptSlashRestoresCursorOnWrappedDraft(t *testing.T) {
 		t.Fatalf("fixture: the middle line should wrap, draft is %d rows", rows)
 	}
 
-	m = pressKey(t, m, tea.KeyTab)
+	m = pressKey(t, m, "tab")
 	want := "alpha\n" + head + " /research " + tail + "\nomega"
 	if m.input.Value() != want {
 		t.Fatalf("draft %q", m.input.Value())
@@ -335,7 +335,7 @@ func TestAcceptSlashRestoresCursorOnWrappedDraft(t *testing.T) {
 		t.Fatalf("the cursor left the second line: row %d", m.input.Line())
 	}
 	// What the restore is for: the next rune typed lands where the cursor is.
-	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'Z'}})
+	tm, _ := m.Update(runeKey('Z'))
 	m = tm.(Model)
 	if got := m.input.Value(); got != want[:wantCursor]+"Z"+want[wantCursor:] {
 		t.Fatalf("the typed rune landed elsewhere: %q", got)
@@ -379,7 +379,7 @@ func TestBareSlashEnterAccepts(t *testing.T) {
 	m, _ := slashModel(t, 80, 30, "research")
 	m = draft(m, "/")
 	first := m.filteredSlash()[0].Name
-	m = pressKey(t, m, tea.KeyEnter)
+	m = pressKey(t, m, "enter")
 	if m.input.Value() != "/"+first+" " {
 		t.Fatalf("bare slash + enter should accept %q, draft is %q", first, m.input.Value())
 	}
@@ -388,7 +388,7 @@ func TestBareSlashEnterAccepts(t *testing.T) {
 	}
 
 	m = draft(m, "/")
-	m = pressKey(t, m, tea.KeyEsc)
+	m = pressKey(t, m, "esc")
 	m, cmd := press(m, enter())
 	if m.status != statusWorking || cmd == nil {
 		t.Fatal("esc then enter sends the bare slash as a prompt")
@@ -403,21 +403,21 @@ func TestSlashAcceptInsideAQueueEdit(t *testing.T) {
 	setStubCommands(stub, "research")
 	m = typeEnter(t, m, "one")
 	id := queuedRows(m)[0].ID
-	m = pressKey(t, m, tea.KeyUp)
-	m = pressKey(t, m, tea.KeyEnter)
+	m = pressKey(t, m, "up")
+	m = pressKey(t, m, "enter")
 	if m.queueEdit != id {
 		t.Fatalf("fixture: edit mode is on %q, want %q", m.queueEdit, id)
 	}
 
 	m = draft(m, "/resea")
-	m = pressKey(t, m, tea.KeyEnter)
+	m = pressKey(t, m, "enter")
 	if m.input.Value() != "/research " {
 		t.Fatalf("enter should accept inside an edit: %q", m.input.Value())
 	}
 	if m.queueEdit != id {
 		t.Fatalf("the accept must not end the edit: %q", m.queueEdit)
 	}
-	m = pressKey(t, m, tea.KeyEnter)
+	m = pressKey(t, m, "enter")
 	if m.queueEdit != "" {
 		t.Fatal("the next enter saves the edit")
 	}
@@ -435,7 +435,7 @@ func TestEscHidesOneTokenOnly(t *testing.T) {
 	if !m.slashActive() {
 		t.Fatal("fixture: the menu should be up on /he")
 	}
-	m = pressKey(t, m, tea.KeyEsc)
+	m = pressKey(t, m, "esc")
 	if m.input.Value() != value {
 		t.Fatalf("esc touched the draft: %q", m.input.Value())
 	}
@@ -444,7 +444,7 @@ func TestEscHidesOneTokenOnly(t *testing.T) {
 	}
 	// Right five times walks the cursor into the second token.
 	for i := 0; i < 5; i++ {
-		m = pressKey(t, m, tea.KeyRight)
+		m = pressKey(t, m, "right")
 	}
 	if got := m.composerCursorOffset(); got != len(value) {
 		t.Fatalf("fixture: the cursor is at %d, want %d", got, len(value))
@@ -464,11 +464,11 @@ func TestEscHidesOneTokenOnly(t *testing.T) {
 func TestSlashHideDoesNotOutliveTheDraft(t *testing.T) {
 	m, _ := slashModel(t, 80, 30, "research")
 	m = draft(m, "/res")
-	m = pressKey(t, m, tea.KeyEsc)
+	m = pressKey(t, m, "esc")
 	if m.slashMenuOpen() {
 		t.Fatal("fixture: esc hides the menu")
 	}
-	m = pressKey(t, m, tea.KeyEnter)
+	m = pressKey(t, m, "enter")
 	if m.status != statusWorking {
 		t.Fatalf("enter under a hidden menu sends: %v", m.status)
 	}
@@ -487,14 +487,14 @@ func TestEscUnderARunningTurnHidesThenCancels(t *testing.T) {
 	if !m.slashActive() {
 		t.Fatal("fixture: the menu should be up mid-message")
 	}
-	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, cmd := press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 	if cmd != nil || m.cardMask != "" {
 		t.Fatal("the first esc hides the menu and nothing else")
 	}
 	if m.status != statusWorking {
 		t.Fatalf("the turn is still running: %v", m.status)
 	}
-	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, cmd = press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 	if cmd == nil || m.cardMask == "" {
 		t.Fatal("the second esc cancels the turn")
 	}
@@ -510,7 +510,7 @@ func TestSlashSelectionResetsOnTokenChange(t *testing.T) {
 	if m.slashSel != 3 {
 		t.Fatalf("selection %d, want 3", m.slashSel)
 	}
-	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	tm, _ := m.Update(runeKey('a'))
 	m = tm.(Model)
 	if m.input.Value() != "see /cmda" {
 		t.Fatalf("draft %q", m.input.Value())
@@ -534,28 +534,28 @@ func TestSlashWindowFollowsTheSelection(t *testing.T) {
 	}
 	// ↑/↓ wrap.
 	for i := 0; i < 2; i++ {
-		m = pressKey(t, m, tea.KeyDown)
+		m = pressKey(t, m, "down")
 	}
 	if m.slashSel != 0 || m.slashTop != 0 {
 		t.Fatalf("down past the last row wraps to the first: sel %d top %d", m.slashSel, m.slashTop)
 	}
-	m = pressKey(t, m, tea.KeyUp)
+	m = pressKey(t, m, "up")
 	if m.slashSel != 11 {
 		t.Fatalf("up from the first row wraps to the last: %d", m.slashSel)
 	}
 	assertSlashWindow(t, m)
 	// PgUp/PgDn move by the granted rows and clamp instead of wrapping.
-	m = pressKey(t, m, tea.KeyPgDown)
+	m = pressKey(t, m, "pgdown")
 	if m.slashSel != 11 {
 		t.Fatalf("pgdn clamps at the last row: %d", m.slashSel)
 	}
-	m = pressKey(t, m, tea.KeyPgUp)
+	m = pressKey(t, m, "pgup")
 	if m.slashSel != 11-granted {
 		t.Fatalf("pgup moves by %d rows: %d", granted, m.slashSel)
 	}
 	assertSlashWindow(t, m)
 	for i := 0; i < 3; i++ {
-		m = pressKey(t, m, tea.KeyPgUp)
+		m = pressKey(t, m, "pgup")
 	}
 	if m.slashSel != 0 {
 		t.Fatalf("pgup clamps at the first row: %d", m.slashSel)
@@ -621,7 +621,7 @@ func TestCommandsUpdateClampsTheSlashSelection(t *testing.T) {
 	if m.slashSel != 2 {
 		t.Fatalf("the selection clamps to the last match: %d", m.slashSel)
 	}
-	m = pressKey(t, m, tea.KeyTab)
+	m = pressKey(t, m, "tab")
 	if m.input.Value() != "see /cmdc " {
 		t.Fatalf("the clamped row is what tab accepts: %q", m.input.Value())
 	}
@@ -648,11 +648,11 @@ func TestZeroGrantedRowsInterceptsNothing(t *testing.T) {
 		t.Fatal("a band granted no rows is not active")
 	}
 
-	m = pressKey(t, m, tea.KeyTab)
+	m = pressKey(t, m, "tab")
 	if m.input.Value() != value {
 		t.Fatalf("tab completed against a band nobody can see: %q", m.input.Value())
 	}
-	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, cmd := press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 	if m.slashHideKey != "" {
 		t.Fatalf("esc recorded a hide for an invisible band: %q", m.slashHideKey)
 	}
@@ -676,7 +676,7 @@ func TestDialogSuppressesTheSlashBand(t *testing.T) {
 	if m.input.Value() != "/mo" {
 		t.Fatalf("the draft is kept: %q", m.input.Value())
 	}
-	m = pressKey(t, m, tea.KeyEsc)
+	m = pressKey(t, m, "esc")
 	if m.dialog != dialogNone {
 		t.Fatal("esc closes the dialog")
 	}
@@ -930,7 +930,7 @@ func TestAcceptSlashPluginSpelling(t *testing.T) {
 			if len(m.filteredSlash()) != 1 {
 				t.Fatalf("fixture: matches %v", slashNames(m))
 			}
-			m = pressKey(t, m, tea.KeyTab)
+			m = pressKey(t, m, "tab")
 			if m.input.Value() != tc.want {
 				t.Fatalf("draft %q, want %q", m.input.Value(), tc.want)
 			}
@@ -946,7 +946,7 @@ func TestAcceptSlashQualifiedRowIgnoresTheColonRule(t *testing.T) {
 		pluginEntry("beta", "rescue", "the other"),
 	})
 	m = draft(m, "/alpha:")
-	m = pressKey(t, m, tea.KeyTab)
+	m = pressKey(t, m, "tab")
 	if m.input.Value() != "/alpha:rescue " {
 		t.Fatalf("draft %q", m.input.Value())
 	}
@@ -961,7 +961,7 @@ func TestAcceptACPNameWithColon(t *testing.T) {
 	if names := slashNames(m); len(names) != 1 || names[0] != "codex:review" {
 		t.Fatalf("fixture: matches %v", names)
 	}
-	m = pressKey(t, m, tea.KeyTab)
+	m = pressKey(t, m, "tab")
 	if m.input.Value() != "/codex:review " {
 		t.Fatalf("draft %q, want %q", m.input.Value(), "/codex:review ")
 	}
@@ -1007,8 +1007,8 @@ func TestPluginNamedLikeABuiltinShowsQualified(t *testing.T) {
 	if !ok || !it.Builtin {
 		t.Fatalf("the bare /help row is craze's own: %+v", it)
 	}
-	m = pressKey(t, m, tea.KeyDown)
-	m = pressKey(t, m, tea.KeyTab)
+	m = pressKey(t, m, "down")
+	m = pressKey(t, m, "tab")
 	if m.input.Value() != "/helper:help " {
 		t.Fatalf("draft %q", m.input.Value())
 	}

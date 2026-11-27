@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/transcript"
@@ -95,7 +95,7 @@ func claudeScripted(t *testing.T, p agent.Provider, mode string, modes ...string
 // shiftTab is one Shift+Tab, its SetMode run and applied.
 func shiftTab(t *testing.T, m Model) Model {
 	t.Helper()
-	tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+	tm, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
 	m = tm.(Model)
 	if cmd == nil {
 		t.Fatalf("Shift+Tab did nothing in mode %q", m.snap.CurrentMode)
@@ -200,7 +200,7 @@ func TestQuestionCardOtherRow(t *testing.T) {
 	if !strings.Contains(plainView(m), "> 3 Other: x▏") || !strings.Contains(plainView(m), "enter send · esc back") {
 		t.Fatalf("the input is not open:\n%s", plainView(m))
 	}
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 	if !m.cardOpen() || !strings.Contains(plainView(m), "> 3 Other…") {
 		t.Fatalf("esc should go back to the options, the card open:\n%s", plainView(m))
 	}
@@ -209,9 +209,9 @@ func TestQuestionCardOtherRow(t *testing.T) {
 	for _, r := range "teal" {
 		m, _ = press(m, runeKey(r))
 	}
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeySpace})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeySpace})
 	m, _ = press(m, runeKey('!'))
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyBackspace})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyBackspace})
 	m, _ = press(m, enter())
 	view = plainView(m)
 	if !strings.Contains(view, "question 2/2  Which sizes?") || !strings.Contains(view, "  3     Other…") {
@@ -273,7 +273,7 @@ func TestClaudeQuestionEscCancels(t *testing.T) {
 	if !strings.Contains(plainView(m), "enter select · esc cancel") {
 		t.Fatalf("the hint:\n%s", plainView(m))
 	}
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 	calls := stub.Calls()
 	if len(calls) != 1 || calls[0].Skip || !calls[0].Cancelled {
 		t.Fatalf("esc sent %+v", calls)
@@ -318,7 +318,7 @@ func TestClaudeSteerPromptRequiredQueuesTheText(t *testing.T) {
 	m = startScripted(t, m, sess, "go", sc)
 	sess.FailNextInterject(agent.ErrPromptRequired)
 	m.input.SetValue("BANANA")
-	m = pumpKey(t, m, tea.KeyMsg{Type: tea.KeyCtrlL})
+	m = pumpKey(t, m, tea.KeyPressMsg{Code: 'l', Mod: tea.ModCtrl})
 	m = pumpUntil(t, m, func(m Model) bool { return m.input.Value() == "" && len(m.queue) == 1 })
 	if m.queue[0].Text != "BANANA" {
 		t.Fatalf("the queued text %+v\n%s", m.queue, plainView(m))

@@ -4,8 +4,8 @@ import (
 	"strings"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/transcript"
@@ -103,44 +103,44 @@ func (m *Model) switchView(delta int) {
 	m.enterView(items[idx].ID)
 }
 
-func (m Model) handleViewKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) handleViewKey(msg keyInput) (tea.Model, tea.Cmd) {
 	if stopped, next, cmd := m.stopViewKey(msg); stopped { // subcancel.go
 		return next, cmd
 	}
-	switch msg.Type {
-	case tea.KeyCtrlY:
+	switch shortcut(msg) {
+	case "ctrl+y":
 		return m.copySelectionOrLastReply()
-	case tea.KeyCtrlO:
+	case "ctrl+o":
 		return m.toggleExpanded()
-	case tea.KeyCtrlT:
+	case "ctrl+t":
 		return m.cycleTasks()
-	case tea.KeyCtrlG:
+	case "ctrl+g":
 		return m.openThemePicker(), nil
-	case tea.KeyEsc, tea.KeyLeft:
+	case "esc", "left":
 		m.leaveView()
 		return m, nil
-	case tea.KeyUp:
+	case "up":
 		// Every scroll here is of the rows as they stand (catchUp), as the
 		// main transcript's page keys are.
 		m.catchUp()
 		m.vp.ScrollUp(1)
 		return m, nil
-	case tea.KeyDown:
+	case "down":
 		m.catchUp()
 		m.vp.ScrollDown(1)
 		return m, nil
-	case tea.KeyPgUp, tea.KeyPgDown:
+	case "pgup", "pgdown":
 		m.catchUp()
 		var cmd tea.Cmd
 		m.vp, cmd = m.vp.Update(msg)
 		return m, cmd
-	case tea.KeyTab:
+	case "tab":
 		m.switchView(1)
 		return m, nil
-	case tea.KeyShiftTab:
+	case "shift+tab":
 		m.switchView(-1)
 		return m, nil
-	case tea.KeyEnter, tea.KeyRight:
+	case "enter", "right":
 		return m, nil
 	}
 	return m, nil
@@ -288,12 +288,7 @@ func (m Model) composerRows() int {
 		// and its cursor are still underneath and come back on decline.
 		return 1
 	}
-	inner := m.composerInner()
-	rows := 0
-	for _, ln := range strings.Split(m.input.Value(), "\n") {
-		rows += wrapRows(ln, inner)
-	}
-	return max(rows, 1)
+	return m.input.Height()
 }
 
 func (m Model) subagentComposerView() string {

@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/charmbracelet/bubbles/textinput"
-	tea "github.com/charmbracelet/bubbletea"
+	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/charliek/craze/internal/chatgptauth"
 )
@@ -207,11 +207,11 @@ func (m Model) connectReturned(to connectReturn, back connectBack, list *sessBac
 // (preConnectQuit); Esc, on any step, is the way out — the dialog has one
 // purpose, and its "back" is where it came from — and every other key is the
 // dialog's (handleConnectDialogKey).
-func (m Model) handlePreConnectKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.Type {
-	case tea.KeyCtrlC, tea.KeyCtrlD:
+func (m Model) handlePreConnectKey(msg keyInput) (tea.Model, tea.Cmd) {
+	switch shortcut(msg) {
+	case "ctrl+c", "ctrl+d":
 		return m.preConnectQuit()
-	case tea.KeyEsc:
+	case "esc":
 		return m.closeDialog(true), nil
 	}
 	return m.handleConnectDialogKey(msg)
@@ -349,8 +349,8 @@ func preSignInFailureText(err error) string {
 // saving, finishing, the notice — whose Esc handlePreConnectKey took
 // already: Enter on the notice goes on; every other key, a paste among them,
 // lands nowhere, since none of them has a field.
-func (m Model) handlePreStepKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if m.cdlg.step == connectNotice && msg.Type == tea.KeyEnter {
+func (m Model) handlePreStepKey(msg keyInput) (tea.Model, tea.Cmd) {
+	if m.cdlg.step == connectNotice && shortcut(msg) == "enter" {
 		return m.preNoticeEnter()
 	}
 	return m, nil

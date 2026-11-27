@@ -2,204 +2,173 @@ package tui
 
 import (
 	"io"
-	"os"
-	"slices"
+	"strings"
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
+	"github.com/creack/pty"
+
+	"github.com/charliek/craze/internal/agent"
 )
 
-// TestRewriteShiftEnter: each Shift+Enter sequence becomes one \n wherever it
-// sits among other input, and nothing else changes — not Ctrl+Enter's
-// sequences, not half a sequence, not Enter.
-func TestRewriteShiftEnter(t *testing.T) {
-	for _, tc := range []struct{ in, want string }{
-		{"\x1b[27;2;13~", "\n"},
-		{"\x1b[13;2u", "\n"},
-		{"ab\x1b[27;2;13~cd", "ab\ncd"},
-		{"\x1b[13;2u\x1b[27;2;13~", "\n\n"},
-		{"\x1b\x1b[13;2u", "\x1b\n"},
-		{"\x1b[27;5;13~", "\x1b[27;5;13~"},
-		{"\x1b[13;5u", "\x1b[13;5u"},
-		{"\x1b[27;2;13", "\x1b[27;2;13"},
-		{"\x1b[13;2", "\x1b[13;2"},
-		{"\x1b", "\x1b"},
-		{"\r", "\r"},
-		{"plain text", "plain text"},
-		{"", ""},
-	} {
-		in := &shiftEnterInput{}
-		b := []byte(tc.in)
-		if got := string(b[:in.rewrite(b, true)]); got != tc.want {
-			t.Errorf("rewrite(%q) = %q, want %q", tc.in, got, tc.want)
-		}
-	}
-}
+// The adapter reserves room for the largest literal expansion in the
+// 4 KiB buffer supplied by Bubble Tea’s scanner.
+const terminalReadRoom = 4096 / 5
 
-// TestRewriteShiftEnterLeavesAPasteAlone: inside a bracketed paste the
-// sequences are pasted text and pass as they came; after the paste ends they
-// are Shift+Enter again. The markers count when a read cuts them in two, and
-// when they arrive in a read passed on whole.
-func TestRewriteShiftEnterLeavesAPasteAlone(t *testing.T) {
-	type read struct {
-		in   string
-		may  bool
-		want string
+// terminalEvents sends bytes through raw mode and Bubble Tea's actual reader.
+// The terminating F12 is separate from the captured sequence.
+func terminalEvents(t *testing.T, text string) []keyInput {
+	t.Helper()
+	master, tty, err := pty.Open()
+	if err != nil {
+		t.Skipf("no PTY: %v", err)
 	}
-	for _, tc := range []struct {
-		name  string
-		reads []read
-	}{
-		{"one read", []read{
-			{"\x1b[200~a\x1b[13;2ub\x1b[201~\x1b[13;2u", true, "\x1b[200~a\x1b[13;2ub\x1b[201~\n"},
-		}},
-		{"markers cut in two", []read{
-			{"\x1b[20", true, "\x1b[20"},
-			{"0~x\x1b[27;2;13~", true, "0~x\x1b[27;2;13~"},
-			{"y\x1b[2", true, "y\x1b[2"},
-			{"01~\x1b[27;2;13~", true, "01~\n"},
-		}},
-		{"a Shift+Enter between a marker's halves makes no marker", []read{
-			{"\x1b[20\x1b[13;2u0~", true, "\x1b[20\n0~"},
-			{"\x1b[13;2u", true, "\n"},
-		}},
-		{"markers in reads passed on whole", []read{
-			{"\x1b[200~ab", false, "\x1b[200~ab"},
-			{"\x1b[13;2u", true, "\x1b[13;2u"},
-			{"c\x1b[201~", false, "c\x1b[201~"},
-			{"\x1b[13;2u", true, "\n"},
-		}},
-	} {
-		in := &shiftEnterInput{}
-		for i, r := range tc.reads {
-			b := []byte(r.in)
-			if got := string(b[:in.rewrite(b, r.may)]); got != r.want {
-				t.Errorf("%s, read %d: rewrite(%q) = %q, want %q", tc.name, i, r.in, got, r.want)
-			}
-		}
+	defer func() { _ = master.Close(); _ = tty.Close() }()
+	rec := &inputRecorder{ready: make(chan struct{})}
+	p := tea.NewProgram(rec, tea.WithInput(newGraphemeInput(tty)), tea.WithOutput(io.Discard), tea.WithoutSignalHandler())
+	done := make(chan error, 1)
+	go func() { _, err := p.Run(); done <- err }()
+	defer func() { p.Kill() }()
+	select {
+	case <-rec.ready:
+	case err := <-done:
+		t.Fatalf("starting PTY: %v", err)
+	case <-time.After(keyBound):
+		t.Fatal("PTY startup timeout")
 	}
-}
-
-// TestShiftEnterInputLeavesAFullReadAlone: a read that fills the buffer is
-// passed on as it came, since shortening it would tell bubbletea it ended on
-// a key's boundary; one with room to spare is rewritten.
-func TestShiftEnterInputLeavesAFullReadAlone(t *testing.T) {
-	const seq = "\x1b[27;2;13~"
-	r, w := pipe(t)
-	in := &shiftEnterInput{f: r}
-	for _, tc := range []struct {
-		size int
-		want string
-	}{
-		{len(seq), seq},
-		{len(seq) + 1, "\n"},
-	} {
-		if _, err := w.WriteString(seq); err != nil {
-			t.Fatal(err)
-		}
-		p := make([]byte, tc.size)
-		n, err := in.Read(p)
+	if _, err = master.WriteString(text + "\x1b[24~"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got := string(p[:n]); got != tc.want {
-			t.Errorf("read into %d bytes = %q, want %q", tc.size, got, tc.want)
-		}
-	}
-}
-
-// TestShiftEnterReachesTheComposerAsANewline: Shift+Enter, in either form,
-// read by bubbletea through shiftEnterInput as a terminal sends it — with the
-// keys typed around it in the same read — is ctrl+j, and ctrl+j in the
-// composer is a newline that sends nothing.
-func TestShiftEnterReachesTheComposerAsANewline(t *testing.T) {
-	for _, seq := range []string{"\x1b[27;2;13~", "\x1b[13;2u"} {
-		keys := shiftEnterKeys(t, "hello"+seq+"world", 3)
-		var got []string
-		for _, k := range keys {
-			got = append(got, k.String())
-		}
-		if want := []string{"hello", "ctrl+j", "world"}; !slices.Equal(got, want) {
-			t.Fatalf("%q read as %q, want %q", seq, got, want)
-		}
-		m := sized(t)
-		for _, k := range keys {
-			tm, _ := m.Update(k)
-			m = tm.(Model)
-		}
-		if m.status != statusIdle {
-			t.Fatalf("%q sent a prompt, status %s", seq, m.status)
-		}
-		if n := turnsStarted(stubOf(t, m)); n != 0 {
-			t.Fatalf("%q started %d turns", seq, n)
-		}
-		if got := m.input.Value(); got != "hello\nworld" {
-			t.Fatalf("%q: composer %q, want %q", seq, got, "hello\nworld")
-		}
-	}
-}
-
-// shiftEnterKeys is the first want keys bubbletea reads from in, written in
-// one piece to a pipe it reads through shiftEnterInput, as Run has it read
-// the terminal.
-func shiftEnterKeys(t *testing.T, in string, want int) []tea.KeyMsg {
-	t.Helper()
-	r, w := pipe(t)
-	if _, err := w.WriteString(in); err != nil {
-		t.Fatal(err)
-	}
-	rec := &keysRecorder{want: want}
-	p := tea.NewProgram(rec, tea.WithInput(&shiftEnterInput{f: r}), tea.WithOutput(io.Discard),
-		tea.WithoutRenderer(), tea.WithoutSignalHandler())
-	done := make(chan struct{})
-	go func() {
-		_, _ = p.Run()
-		close(done)
-	}()
-	select {
-	case <-done:
 	case <-time.After(keyBound):
-		p.Kill()
-		<-done
+		t.Fatal("PTY input timeout")
 	}
-	if len(rec.keys) != want {
-		t.Fatalf("%q was read as %v, want %d keys", in, rec.keys, want)
-	}
-	return rec.keys
+	return rec.events
 }
 
-// pipe is an os.Pipe closed when the test ends.
-func pipe(t *testing.T) (r, w *os.File) {
-	t.Helper()
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		_ = r.Close()
-		_ = w.Close()
-	})
-	return r, w
+type inputRecorder struct {
+	ready  chan struct{}
+	events []keyInput
 }
 
-// keysRecorder is a program that keeps the keys it is sent and quits at the
-// want'th.
-type keysRecorder struct {
-	want int
-	keys []tea.KeyMsg
-}
-
-func (r *keysRecorder) Init() tea.Cmd { return nil }
-
-func (r *keysRecorder) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	if k, ok := msg.(tea.KeyMsg); ok {
-		r.keys = append(r.keys, k)
-		if len(r.keys) == r.want {
+func (r *inputRecorder) Init() tea.Cmd  { close(r.ready); return nil }
+func (r *inputRecorder) View() tea.View { return tea.View{} }
+func (r *inputRecorder) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyPressMsg:
+		if msg.Code == tea.KeyF12 {
 			return r, tea.Quit
 		}
+		r.events = append(r.events, msg)
+	case tea.PasteMsg:
+		r.events = append(r.events, msg)
 	}
 	return r, nil
 }
 
-func (r *keysRecorder) View() string { return "" }
+func TestShiftEnterReachesTheComposerAsANewline(t *testing.T) {
+	for _, seq := range []string{"\x1b[27;2;13~", "\x1b[13;2u"} {
+		m := sized(t)
+		for _, k := range terminalEvents(t, "hello"+seq+"world") {
+			m, _ = press(m, k)
+		}
+		if got := m.input.Value(); got != "hello\nworld" || turnsStarted(stubOf(t, m)) != 0 {
+			t.Fatalf("%q produced draft %q, status %s", seq, got, m.status)
+		}
+	}
+}
+
+func TestTerminalGraphemesCannotAnswerPermission(t *testing.T) {
+	m, stub := sizedCards(t)
+	m = cardEvent(t, m, stub, agent.Event{Type: agent.EventPermission, Permission: stubPermissionEvent(true)})
+	for _, k := range terminalEvents(t, keycapOne+decomposed+pasteStart+"1"+pasteEnd) {
+		m, _ = press(m, k)
+	}
+	if headAsk(m) != "perm-1" || len(stub.Asks().Resolved()) != 0 {
+		t.Fatal("composed or pasted text answered the permission card")
+	}
+	keys := terminalEvents(t, "1")
+	if len(keys) != 1 {
+		t.Fatalf("ordinary key: %#v", keys)
+	}
+	m, _ = press(m, keys[0])
+	if headAsk(m) != "" || len(stub.Asks().Resolved()) != 1 {
+		t.Fatal("ordinary 1 did not answer the permission card")
+	}
+
+	m = sized(t)
+	for _, k := range terminalEvents(t, keycapOne+decomposed) {
+		m, _ = press(m, k)
+	}
+	if got := m.input.Value(); got != keycapOne+decomposed {
+		t.Fatalf("composed draft %q", got)
+	}
+}
+
+// A single queued terminal write can straddle multiple reader buffers. Move
+// the ASCII base and the first bytes of its mark across that boundary.
+func TestTerminalGraphemeAtReadBoundary(t *testing.T) {
+	for before := 0; before < 3; before++ {
+		text := strings.Repeat("x", terminalReadRoom-1-before) + keycapOne
+		var got strings.Builder
+		for _, event := range terminalEvents(t, text) {
+			switch k := event.(type) {
+			case tea.KeyPressMsg:
+				if shortcut(k) == "1" {
+					t.Fatalf("offset %d dispatched the keycap's shortcut", before)
+				}
+				got.WriteString(k.Text)
+			case tea.PasteMsg:
+				got.WriteString(k.Content)
+			}
+		}
+		if got.String() != text {
+			t.Fatalf("offset %d lost literal input", before)
+		}
+	}
+}
+
+// Focus notifications put the beginning of the OSC in one terminal read and
+// its BEL terminator in the next. Only the following keycap is keyboard input.
+func TestTerminalKeycapAfterSplitColorReport(t *testing.T) {
+	const focusIn = "\x1b[I"
+	prefix := strings.Repeat(focusIn, terminalReadRoom/len(focusIn)-1)
+	got := terminalEvents(t, prefix+"\x1b]11;rgb:1111/2222/3333\a"+keycapOne)
+	if len(got) != 1 || got[0] != (tea.PasteMsg{Content: keycapOne}) {
+		t.Fatalf("keycap after color report: %#v", got)
+	}
+}
+
+func TestTerminalBracketedPasteRemainsAtomic(t *testing.T) {
+	text := "up\n" + keycapOne + " " + decomposed
+	got := terminalEvents(t, pasteStart+text+pasteEnd+pasteStart+pasteEnd+"\r\n")
+	if len(got) != 4 || got[0] != (tea.PasteMsg{Content: text}) || got[1] != (tea.PasteMsg{}) || shortcut(got[2]) != "enter" || shortcut(got[3]) != "ctrl+j" {
+		t.Fatalf("paste, empty paste, Enter, Ctrl+J: %#v", got)
+	}
+}
+
+// Terminal reports, mouse coordinates and bracketed paste can contain the
+// same bytes as a keycap. Once a report ends, the next keycap is literal again.
+func TestGraphemeInputPreservesControlSequencesAcrossReads(t *testing.T) {
+	for _, report := range []string{
+		pasteStart + keycapOne + pasteEnd,
+		"\x1b]11;rgb:1111/2222/3333\a",
+		"\x1b]0;" + keycapOne + "\x1b\\",
+		"\x1bP1;2q" + keycapOne + "\x1b\\",
+		"\x1b[M" + decomposed,
+	} {
+		for split := range len(report) + 1 {
+			in := newGraphemeInput(nil)
+			got := in.literalClusters(nil, []byte(report[:split]))
+			got = in.literalClusters(got, []byte(report[split:]+keycapOne))
+			if want := report + pasteStart + keycapOne + pasteEnd; string(got) != want {
+				t.Fatalf("report %q split at %d: got %q, want %q", report, split, got, want)
+			}
+		}
+	}
+}

@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/charliek/craze/internal/agent"
 )
@@ -107,7 +107,7 @@ func TestTasksCycleCompactExpandedHidden(t *testing.T) {
 		t.Fatalf("default state %v", m.tasksState)
 	}
 
-	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlT})
+	tm, _ := m.Update(tea.KeyPressMsg{Code: 't', Mod: tea.ModCtrl})
 	m = tm.(Model)
 	if m.tasksState != tasksExpanded {
 		t.Fatalf("ctrl+t once: %v", m.tasksState)
@@ -116,7 +116,7 @@ func TestTasksCycleCompactExpandedHidden(t *testing.T) {
 		t.Fatalf("expanded lists completed items:\n%s", view)
 	}
 
-	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlT})
+	tm, _ = m.Update(tea.KeyPressMsg{Code: 't', Mod: tea.ModCtrl})
 	m = tm.(Model)
 	if m.tasksState != tasksHidden || m.tasksPanelVisible() {
 		t.Fatalf("ctrl+t twice: %v", m.tasksState)
@@ -141,7 +141,7 @@ func TestTasksHiddenPersistsThroughNewLists(t *testing.T) {
 	m, stub, _ := todoModel(t)
 	m = sendTodos(t, m, stub, openTodos())
 	for i := 0; i < 2; i++ {
-		tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlT})
+		tm, _ := m.Update(tea.KeyPressMsg{Code: 't', Mod: tea.ModCtrl})
 		m = tm.(Model)
 	}
 	if m.tasksState != tasksHidden {

@@ -16,7 +16,7 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/creack/pty"
 
@@ -723,24 +723,36 @@ func runInPTY(t *testing.T, f *tuiFlags) *ttyRun {
 	if err := pty.Setsize(tty, &pty.Winsize{Rows: 30, Cols: 100}); err != nil {
 		t.Skipf("pty resize: %v", err)
 	}
-	r := &ttyRun{ptmx: ptmx, tail: newPTYTail(ptmx), done: make(chan error, 1)}
+	r := &ttyRun{ptmx: ptmx, tail: newTUITail(t, ptmx), done: make(chan error, 1)}
 	prevIn, prevOut, prevErr := os.Stdin, os.Stdout, os.Stderr
 	os.Stdin, os.Stdout, os.Stderr = tty, tty, tty
-	go func() { r.done <- runTUI(nil, f, hostEnv{}) }()
-	t.Cleanup(func() { os.Stdin, os.Stdout, os.Stderr = prevIn, prevOut, prevErr })
+	go func() {
+		defer close(r.done)
+		r.done <- runTUI(nil, f, hostEnv{})
+	}()
+	t.Cleanup(func() {
+		// An assertion can end the test while the TUI still owns stdio.
+		// Let it flush and return before restoring the process globals.
+		select {
+		case <-r.done:
+		default:
+			_, _ = ptmx.Write([]byte{0x04})
+			select {
+			case <-r.done:
+			case <-time.After(serveStep):
+				t.Fatal("TUI still owns stdio after cleanup sent Ctrl+D")
+			}
+		}
+		os.Stdin, os.Stdout, os.Stderr = prevIn, prevOut, prevErr
+	})
 	return r
 }
 
-// see waits a step for the pty to have shown text, read with its escape
-// sequences stripped: every part of a row is styled on its own.
+// see waits a step for text in the visible terminal cells.
 func (r *ttyRun) see(t *testing.T, text string) {
 	t.Helper()
-	deadline := time.Now().Add(serveStep)
-	for !strings.Contains(ansi.Strip(r.tail.text()), text) {
-		if time.Now().After(deadline) {
-			t.Fatalf("the TUI never showed %q; got %q", text, ansi.Strip(r.tail.text()))
-		}
-		time.Sleep(20 * time.Millisecond)
+	if !r.tail.waitScreen(t, text, serveStep) {
+		t.Fatalf("the TUI never showed %q; screen:\n%s\nPTY output: %q", text, r.tail.screen(t), r.tail.text())
 	}
 }
 
@@ -881,7 +893,12 @@ func TestADetachedStartFailureStaysOnScreen(t *testing.T) {
 	r := runInPTY(t, launchFlags(t, ws))
 	r.see(t, " craze ─")
 	r.see(t, "authentication failed")
-	r.see(t, "(the session host's log: ")
+	r.see(t, "(the session host's log:")
+	logs := hostLogs(t, env)
+	if len(logs) != 1 {
+		t.Fatalf("one host log expected, got %v", logs)
+	}
+	r.see(t, filepath.Base(logs[0]))
 	err := r.ctrlD(t)
 	if err == nil || !strings.Contains(err.Error(), "authentication failed") || !strings.Contains(err.Error(), "host-logs") {
 		t.Fatalf("runTUI: %v, want the start failure naming the host's log", err)
@@ -1035,7 +1052,7 @@ func TestAHostThatCannotBindIsAStartFailure(t *testing.T) {
 					m, cmd = m.Update(enterKey)
 				}
 				m = feed(m, runCmd(t, cmd, serveStep))
-				view = ansi.Strip(m.View())
+				view = ansi.Strip(m.View().Content)
 				return tui.Result{StartErr: spawnErr}, spawnErr
 			})
 			argv := []string{"--workspace", ws, "--agent-bin", fakeAgentPath(t)}
@@ -1164,7 +1181,7 @@ func TestAResumeChoiceIsHeldToItsFlagsByItsHost(t *testing.T) {
 					return tui.Result{}, nil
 				}
 				m = feed(m, msgs)
-				view = ansi.Strip(m.View())
+				view = ansi.Strip(m.View().Content)
 				return tui.Result{}, nil
 			})
 			cmd, f := parseTUIFlags(t, "--resume", "--workspace", ws, "--agent-bin", fakeAgentPath(t))

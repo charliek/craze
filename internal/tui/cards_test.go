@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/charliek/craze/internal/agent"
 )
@@ -170,7 +170,7 @@ func TestQuestionCardWalksTheQuestionsAndAnswersOnce(t *testing.T) {
 	if !strings.Contains(view, "[x] X") || !strings.Contains(view, "[x] Z") || !strings.Contains(view, "[ ] Y") {
 		t.Fatalf("toggles did not take:\n%s", view)
 	}
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyUp})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyUp})
 	if !strings.Contains(plainView(m), "> 2 [ ] Y") {
 		t.Fatalf("↑ should move the cursor:\n%s", plainView(m))
 	}
@@ -250,7 +250,7 @@ func TestQuestionCardEscSkipsTheWholeRequest(t *testing.T) {
 	m, stub := questionCard(t)
 	// Halfway through is still a skip of the request, not of one question.
 	m, _ = press(m, runeKey('1'))
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 	if m.cardOpen() {
 		t.Fatal("esc should close the card")
 	}
@@ -269,7 +269,7 @@ func TestQuestionCardEscSkipsTheWholeRequest(t *testing.T) {
 
 func TestPlanCardWritesTheBlockAndAnswers(t *testing.T) {
 	for _, tc := range []struct {
-		key    tea.KeyMsg
+		key    tea.KeyPressMsg
 		accept bool
 		note   string
 	}{
@@ -311,7 +311,7 @@ func TestPlanCardWritesTheBlockAndAnswers(t *testing.T) {
 
 func TestPlanCardEscCancels(t *testing.T) {
 	m, stub := planCard(t)
-	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, cmd := press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 	if m.cardOpen() {
 		t.Fatal("esc should close the card")
 	}
@@ -464,7 +464,7 @@ func TestCtrlCAnswersEveryQueuedCardOnce(t *testing.T) {
 	m = cardEvent(t, m, stub, agent.Event{Type: agent.EventQuestion, Question: stubQuestion()})
 	m = cardEvent(t, m, stub, agent.Event{Type: agent.EventPlan, Plan: stubPlanEvent()})
 
-	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyCtrlC})
+	m, cmd := press(m, tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
 	if m.quitting {
 		t.Fatal("ctrl+c with a card up should cancel, not quit")
 	}
@@ -485,7 +485,7 @@ func TestCtrlCAnswersEveryQueuedCardOnce(t *testing.T) {
 	}
 
 	// Nothing is left to answer a second time.
-	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyCtrlC})
+	m, cmd = press(m, tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
 	if !m.quitting {
 		t.Fatal("the second ctrl+c inside the window quits")
 	}
@@ -524,7 +524,7 @@ func TestAnswerReachesTheSessionBeforeACancelCanClaimIt(t *testing.T) {
 	}
 
 	// Cancelling now can only claim what is still queued.
-	_, cmd := press(m, tea.KeyMsg{Type: tea.KeyCtrlC})
+	_, cmd := press(m, tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
 	if msg := runCmd(cmd); msg != nil {
 		t.Fatalf("cancel failed: %v", msg)
 	}
@@ -568,7 +568,7 @@ func TestCardEventAfterACancelIsDropped(t *testing.T) {
 		stub.Emit(inFlight[i])
 	}
 
-	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyCtrlC})
+	m, cmd := press(m, tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
 	runCmd(cmd)
 	// The cancel answered every one of them where it lay — CancelTurn runs
 	// inside Stub.Cancel, so this is settled by the time the command returns —
@@ -639,7 +639,7 @@ func TestALiveNoTurnCardIsRaisedThroughTheCancelMask(t *testing.T) {
 		t.Fatalf("the hung turn did not open within %v", stubEventWait)
 	}
 
-	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyCtrlC})
+	m, cmd := press(m, tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
 	runCmd(cmd)
 	if !m.cardMasking || m.cardMask != cancelled {
 		t.Fatalf("the mask is up and keyed to %q, got %q (up: %v)", cancelled, m.cardMask, m.cardMasking)
@@ -684,7 +684,7 @@ func TestANoTurnCancelMasksTheOpeningItAnswered(t *testing.T) {
 
 	// Esc on the plan card cancels: with no turn of craze's own the engine
 	// accepts it because an ask is pending (X9), and it answers every one.
-	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, cmd := press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 	runCmd(cmd)
 	if m.status == statusWorking {
 		t.Fatal("the fixture needs a cancel with no turn of craze's own")
@@ -726,7 +726,7 @@ func TestTheCancelMaskDoesNotLeakOntoTheNextTurn(t *testing.T) {
 	m = tm.(Model)
 	cancelled := m.turnID
 
-	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyCtrlC})
+	m, cmd := press(m, tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
 	runCmd(cmd)
 	if m.cardMask != cancelled {
 		t.Fatalf("the mask is keyed to the cancelled turn, got %q want %q", m.cardMask, cancelled)
@@ -752,7 +752,7 @@ func TestTheCancelMaskDoesNotLeakOntoTheNextTurn(t *testing.T) {
 func TestQuitAnswersQueuedCards(t *testing.T) {
 	m, stub := sizedCards(t)
 	m = cardEvent(t, m, stub, agent.Event{Type: agent.EventQuestion, Question: stubQuestion()})
-	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyCtrlD})
+	m, cmd := press(m, tea.KeyPressMsg{Code: 'd', Mod: tea.ModCtrl})
 	if !m.quitting {
 		t.Fatal("ctrl+d always quits")
 	}
@@ -770,11 +770,11 @@ func TestCardsOwnTheKeyboard(t *testing.T) {
 	m.input.SetValue("half a thought")
 	m = cardEvent(t, m, stub, agent.Event{Type: agent.EventQuestion, Question: stubQuestion()})
 
-	for _, k := range []tea.KeyMsg{
-		{Type: tea.KeyCtrlT},
-		{Type: tea.KeyCtrlG},
-		{Type: tea.KeyCtrlO},
-		{Type: tea.KeyShiftTab},
+	for _, k := range []tea.KeyPressMsg{
+		{Code: 't', Mod: tea.ModCtrl},
+		{Code: 'g', Mod: tea.ModCtrl},
+		{Code: 'o', Mod: tea.ModCtrl},
+		{Code: tea.KeyTab, Mod: tea.ModShift},
 	} {
 		var cmd tea.Cmd
 		m, cmd = press(m, k)
@@ -811,7 +811,7 @@ func TestCardSuspendsTheLowerOverlays(t *testing.T) {
 		t.Fatal("fixture: the slash menu should be open")
 	}
 	m = m.openThemePicker()
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyDown})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyDown})
 	preview := m.theme.Name
 	if preview == "tokyo-night" {
 		t.Fatal("the picker should have previewed another theme")

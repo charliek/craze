@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any, Self
 
 import pytest
-from test_tui import _ANSI, PTYCraze, _wait_fake_gone, _wait_output, quit_craze
+from test_tui import PTYCraze, _wait_fake_gone, _wait_output, quit_craze
 
 PANE = "w9:p42"
 SOURCE = "custom:craze"
@@ -522,13 +522,13 @@ def test_herdr_unreachable_socket_warns_once_after_exit(
             tui.write(b"hello\r")
             tui.wait_contains("echo: hello", timeout=WAIT)
             # The failed sends so far are held, not drawn over the frame.
-            assert "host status" not in _ANSI.sub("", tui.screen())
+            assert "host status" not in tui.history()
             quit_craze(tui, timeout=WAIT)
             _wait_output(tui, "host status: herdr: ", timeout=WAIT)
             # The reader stops at the pty's end of file, so the count below is
             # over everything craze wrote.
             tui._reader.join(timeout=WAIT)
-            text = _ANSI.sub("", tui.screen())
+            text = tui.raw_output()
         _wait_fake_gone(fake_agent_bin)
     finally:
         shutil.rmtree(nowhere, ignore_errors=True)
@@ -543,8 +543,8 @@ def _child_env_names(tui: PTYCraze) -> set[str]:
     tui.write(b"which\r")
     text = tui.wait_contains("envset:", timeout=WAIT)
     tui.wait_contains(":end", timeout=WAIT)
-    match = _ENVSET.search(_ANSI.sub("", tui.screen()))
-    assert match, _ANSI.sub("", text)[-2000:]
+    match = _ENVSET.search(tui.screen())
+    assert match, text[-2000:]
     names = match.group(1).split()
     return set() if names == ["none"] else set(names)
 

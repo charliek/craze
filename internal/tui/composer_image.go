@@ -17,8 +17,8 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/charmbracelet/bubbles/key"
-	tea "github.com/charmbracelet/bubbletea"
+	"charm.land/bubbles/v2/key"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/backend"
@@ -436,7 +436,7 @@ func (m Model) pasteClipboardImage(msg pasteMsg) (tea.Model, tea.Cmd) {
 			// Inserted as one bracketed paste of the chip's text, the way a
 			// file's chips are: updateComposer leaves text that is not a list
 			// of image paths as it is.
-			return m, tea.Batch(m.updateComposer(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(chips), Paste: true}), cmd)
+			return m, tea.Batch(m.updateComposer(tea.PasteMsg{Content: chips}), cmd)
 		}
 		note = refused
 	}
@@ -450,7 +450,7 @@ func (m Model) pasteClipboardImage(msg pasteMsg) (tea.Model, tea.Cmd) {
 	if msg.text == "" {
 		return m, nil
 	}
-	return m, m.updateComposer(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(msg.text), Paste: true})
+	return m, m.updateComposer(tea.PasteMsg{Content: msg.text})
 }
 
 // overSSH reports that the TUI runs in an SSH session: any of the variables
@@ -1029,8 +1029,8 @@ func (m *Model) imagesFromRefs(refs []agent.AttachmentRef) draftImages {
 // just before one (§3.3): the whole chip goes, and its entry with it. It
 // reports whether msg was that; any other key is the textarea's. Only a chip
 // with an entry is atomic — a label typed by hand is text like any other.
-func (m *Model) deleteChip(msg tea.KeyMsg) bool {
-	if msg.Paste || len(m.images.list) == 0 {
+func (m *Model) deleteChip(msg keyInput) bool {
+	if _, paste := msg.(tea.PasteMsg); paste || len(m.images.list) == 0 || m.input.HasSelection() {
 		return false
 	}
 	back := key.Matches(msg, m.input.KeyMap.DeleteCharacterBackward)
@@ -1076,7 +1076,6 @@ func (m *Model) replaceComposerChip(n int, orig string) {
 		off = at + len(orig)
 	}
 	next := v[:at] + orig + v[at+len(label):]
-	m.input.SetHeight(composerHeadroom)
 	m.input.SetValue(next)
 	m.setComposerCursor(next, off)
 }

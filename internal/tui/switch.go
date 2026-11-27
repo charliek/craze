@@ -4,7 +4,7 @@ import (
 	"maps"
 	"sync"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/charliek/craze/internal/backend"
 	"github.com/charliek/craze/internal/chatgptauth"
@@ -117,7 +117,7 @@ func (m Model) withSession(seed sessionSeed) Model {
 		layouts:              m.layouts,
 		// The terminal's motion mode and the timers in flight are the
 		// terminal's and the program's: a switch changes neither.
-		mouseAll:        m.mouseAll,
+
 		tickGen:         m.tickGen,
 		tickLive:        m.tickLive,
 		tickFast:        m.tickFast,
@@ -130,14 +130,14 @@ func (m Model) withSession(seed sessionSeed) Model {
 		frozen:          m.frozen,
 		frameStart:      m.frameStart,
 		terminalTitle:   m.terminalTitle,
-		lastTitle:       m.lastTitle,
-		term:            m.term,
-		shell:           m.shell,
-		owner:           m.owner,
-		exit:            m.exit,
-		host:            m.host,
-		lastHost:        m.lastHost,
-		viewer:          m.viewer,
+
+		background: m.background,
+		shell:      m.shell,
+		owner:      m.owner,
+		exit:       m.exit,
+		host:       m.host,
+		lastHost:   m.lastHost,
+		viewer:     m.viewer,
 		// The config: the in-process path's hooks and rows, the pickers'
 		// closures, the launch flow's spawns and the session list.
 		sessionIndex:    m.sessionIndex,

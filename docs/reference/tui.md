@@ -557,7 +557,7 @@ off.
 |---|---|
 | `Enter` | with the [`@` file popup](#file-mentions) open on a candidate, pick it; with the slash menu open on a token that is not already typed out in full, accept the highlighted row; on a draft that starts with `!`, run it in your own shell (see [Shell mode](#shell-mode)); otherwise send the draft, or **queue** it while a turn is running (see [Queued messages](#queued-messages)) |
 | `Ctrl+L` | the strong send: on Grok, claude and native, add the draft to the running turn without cancelling it; on Cursor, cancel the running turn and send (it asks first). On an idle session it is a plain send. On a `/btw` draft, where `/btw` is offered, it opens the [side view](#side-questions-btw) as `Enter` does and is never sent into the turn |
-| `Alt+Enter`, `Ctrl+J`, `Shift+Enter` | newline; `Shift+Enter` only in a terminal that sends it as one of the two sequences below, as Ghostty and Roost do (see below) |
+| `Alt+Enter`, `Ctrl+J`, `Shift+Enter` | insert a newline. `Shift+Enter` requires a terminal that reports the Shift modifier (see below) |
 | `Esc` | answer the card on top; close a dialog (`/help` included); close the [side view](#side-questions-btw); leave the sub-agent view; kill a running `!` command; clear a `!` draft; hide the slash menu or the [`@` file popup](#file-mentions) for the token under the cursor — a second `Esc` then cancels the running turn; otherwise cancel the running turn (the transcript says `cancelled`), or stop a turn the agent runs on its own (a native [wake](#background-sub-agents), or [claude working on its own](#claude-working-on-its-own)), or, with nothing running, decline the plan offer. An Esc pressed immediately after Enter cancels that turn; craze never writes the cancel ahead of the prompt |
 | `Ctrl+C` | kill a running `!` command, and nothing else — it is the only way to stop one while a card has the keyboard. With none running: cancel the running turn **and everything queued behind it** — the queue, a confirm on screen, a send-now waiting to fire; a second press within one second ends the session; it ends it outright when idle or after an error. Inside the sub-agent view it still cancels the **main** turn, and the view stays open. Inside the [side view](#side-questions-btw), with no card up, it closes the view and does nothing else |
 | `Ctrl+D` | ends the session, always |
@@ -591,26 +591,17 @@ off.
 bindings, so a message that starts with either is just a message.
 
 !!! note "Shift+Enter"
-    `Ctrl+J` and `Alt+Enter` are the dependable newline keys (`Alt+Enter`
-    needs a terminal that sends Alt, Option on macOS, as Meta). `Shift+Enter`
-    is a newline when the terminal sends it as one of two sequences:
-    `ESC [ 27 ; 2 ; 13 ~`, xterm's modifyOtherKeys form, which Ghostty and
-    Roost (built on libghostty) send for Shift+Enter without being asked, or
-    `ESC [ 13 ; 2 u`, the kitty keyboard protocol's. craze reads them when its
-    standard input is the terminal, as it is when you start craze from a
-    shell, and inside a bracketed paste they stay pasted text. Most other
-    terminals send Shift+Enter as a bare `Enter` unless the program turns a
-    keyboard protocol on, which craze does not (bubbletea v1 cannot read the
-    rest of the kitty protocol); there craze cannot tell the two apart, and
-    Shift+Enter sends the message. A terminal that lets you remap keys can be
-    set to send either sequence for Shift+Enter.
+    Craze requests extended keyboard input from the terminal. In terminals that
+    report the modifier, including Ghostty and Roost, `Shift+Enter` inserts a
+    newline. Both xterm’s modifyOtherKeys sequence (`ESC [ 27 ; 2 ; 13 ~`) and
+    the kitty keyboard sequence (`ESC [ 13 ; 2 u`) are supported. A terminal
+    that sends a bare `Enter` submits the draft. Use `Ctrl+J` there, or
+    `Alt+Enter` if your terminal sends Alt (Option on macOS) as Meta.
 
-!!! note "Why `Ctrl+L` and not `Ctrl+Enter`"
-    The same limitation: bubbletea v1 has no `Ctrl+Enter` and does not parse
-    the kitty keyboard protocol, so in most terminals `Ctrl+Enter` arrives as
-    a bare `\r` — indistinguishable from `Enter`, which is the key that
-    queues. Grok's own TUI falls back to `Ctrl+L` for the same reason, so
-    craze does too.
+!!! note "Strong send"
+    `Ctrl+L` works across terminal keyboard protocols and matches Grok's TUI.
+    It remains available in terminals that send the same bytes for `Ctrl+Enter`
+    and `Enter`.
 
 ## Transcript layouts
 

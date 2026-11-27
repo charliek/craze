@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/charliek/craze/internal/agent"
 )
@@ -158,9 +158,9 @@ func TestAnOlderOptionStepIsNotWrittenIntoANewModelsCatalog(t *testing.T) {
 			m.input.SetValue("/model")
 			tm, _ := m.Update(enter())
 			m = tm.(Model)
-			m = pressKey(t, m, tea.KeyTab)
-			m = pressKey(t, m, tea.KeyTab)
-			m = pressKey(t, m, tea.KeyRight)
+			m = pressKey(t, m, "tab")
+			m = pressKey(t, m, "tab")
+			m = pressKey(t, m, "right")
 			tm, cmd := m.Update(enter())
 			m = tm.(Model)
 			applied, ok := runCmd(cmd).(modelApplyMsg)

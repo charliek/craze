@@ -5,8 +5,8 @@ import (
 	"strings"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/charliek/craze/internal/agent"
@@ -253,28 +253,28 @@ func (m Model) confirmResume(row sessions.Row) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(m.startCmd(), waitEvent(m.eng, m.bgen), check)
 }
 
-func (m Model) handleResumeDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) handleResumeDialogKey(msg keyInput) (tea.Model, tea.Cmd) {
 	n := len(m.resume)
 	if n == 0 {
 		return m, nil
 	}
-	switch msg.Type {
-	case tea.KeyEnter:
+	switch shortcut(msg) {
+	case "enter":
 		return m.chooseResume(m.resume[m.resumeCursor])
-	case tea.KeyEsc:
+	case "esc":
 		// Esc quits, and quits clean: no session was ever started, so
 		// startErr is nil and Run returns nil (§3.7). There is no "default
 		// row" the way the provider picker has a default provider — starting
 		// somebody's last session because they pressed Esc would be the
 		// opposite of what Esc means.
 		return m.requestQuit()
-	case tea.KeyUp, tea.KeyShiftTab:
+	case "up", "shift+tab":
 		m.resumeCursor = (m.resumeCursor - 1 + n) % n
 		// A refusal is about the row it was for: once the cursor leaves it,
 		// the error row goes.
 		m.resumeErr = ""
 		return m, nil
-	case tea.KeyDown, tea.KeyTab:
+	case "down", "tab":
 		m.resumeCursor = (m.resumeCursor + 1) % n
 		m.resumeErr = ""
 		return m, nil

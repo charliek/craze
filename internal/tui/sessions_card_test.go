@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/roster"
@@ -46,7 +46,7 @@ func hereFromEngine(t *testing.T, m Model, title, ws string) roster.Row {
 }
 
 // left is an unmodified ←.
-func left() tea.KeyMsg { return tea.KeyMsg{Type: tea.KeyLeft} }
+func left() tea.KeyPressMsg { return tea.KeyPressMsg{Code: tea.KeyLeft} }
 
 // firstMissing is the first of subs that s does not contain, "" when it
 // contains them all.
@@ -77,7 +77,7 @@ func TestSessionsLeftThroughACard(t *testing.T) {
 	m = cardEvent(t, m, stub, agent.Event{Type: agent.EventQuestion, Question: stubQuestion()})
 	m, _ = press(m, runeKey('1'))
 	m, _ = press(m, runeKey('3'))
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyUp})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyUp})
 	progress := []string{"question 2/2  Pick any", "[x] Z", "> 2 [ ] Y"}
 	if miss := firstMissing(plainView(m), progress...); miss != "" {
 		t.Fatalf("fixture: the card's progress %q:\n%s", miss, plainView(m))
@@ -105,7 +105,7 @@ func TestSessionsLeftThroughACard(t *testing.T) {
 		t.Fatalf("the list over the card:\n%s", v)
 	}
 
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 	if m.sessList.open {
 		t.Fatal("esc did not leave the list")
 	}
@@ -143,7 +143,7 @@ func TestSessionsOnlyBareLeftPassesACard(t *testing.T) {
 				t.Fatal("fixture: no card")
 			}
 			card, view := m.cards, plainView(m)
-			alt, _ := press(m, tea.KeyMsg{Type: tea.KeyLeft, Alt: true})
+			alt, _ := press(m, tea.KeyPressMsg{Code: tea.KeyLeft, Mod: tea.ModAlt})
 			if alt.sessList.open {
 				t.Fatal("alt+← with a card up opened the list")
 			}
@@ -183,7 +183,7 @@ func TestSessionsLeftWithoutACardKeepsItsPlace(t *testing.T) {
 			t.Fatal("fixture: the turn is not working")
 		}
 		m = typeEnter(t, m, "one")
-		m, _ = press(m, tea.KeyMsg{Type: tea.KeyUp})
+		m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyUp})
 		m, _ = press(m, enter())
 		if m.queueEdit == "" || m.input.Value() != "one" {
 			t.Fatalf("fixture: not editing the queued row (edit %q, composer %q)", m.queueEdit, m.input.Value())
@@ -229,7 +229,7 @@ func TestSessionsLeftThroughACardInTheSubagentView(t *testing.T) {
 	if m.viewing != "task-1" || !reflect.DeepEqual(m.cards, card) || len(stub.Calls()) != 0 {
 		t.Fatalf("behind the list: viewing %q, card kept %v, calls %+v", m.viewing, reflect.DeepEqual(m.cards, card), stub.Calls())
 	}
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 	v := plainView(m)
 	if miss := firstMissing(v, "permission Shell", "receipt only"); m.sessList.open || m.viewing != "task-1" || !reflect.DeepEqual(m.cards, card) || miss != "" {
 		t.Fatalf("back from the list: list open %v, viewing %q, card kept %v, missing %q:\n%s", m.sessList.open, m.viewing, reflect.DeepEqual(m.cards, card), miss, v)

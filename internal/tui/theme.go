@@ -1,21 +1,37 @@
 package tui
 
 import (
+	"image/color"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/colorprofile"
 
 	"github.com/charliek/craze/internal/presentation/theme"
 )
 
 const DefaultTheme = theme.Default
 
-// Theme binds the presentation roles to the renderer's multi-depth colour.
-type Theme = theme.Theme[lipgloss.CompleteColor]
+// Theme holds the semantic colors resolved for this client’s output.
+type Theme struct {
+	theme.Theme[color.Color]
+	profile                colorprofile.Profile
+	terminalFG, terminalBG color.Color
+}
 
+// Preset returns the full-color palette for headless rendering.
 func Preset(name string) Theme {
-	return theme.Preset(name, func(t theme.Tone) lipgloss.CompleteColor { return lipgloss.CompleteColor(t) })
+	return presetFor(name, colorprofile.TrueColor)
+}
+
+func presetFor(name string, profile colorprofile.Profile) Theme {
+	complete := lipgloss.Complete(profile)
+	slots := theme.Preset(name, func(t theme.Tone) color.Color {
+		return complete(lipgloss.Color(t.ANSI), lipgloss.Color(t.ANSI256), lipgloss.Color(t.TrueColor))
+	})
+	fg, bg := theme.TerminalColors(slots.Name)
+	return Theme{Theme: slots, profile: profile, terminalFG: lipgloss.Color(fg), terminalBG: lipgloss.Color(bg)}
 }
 
 func KnownPreset(name string) bool { return theme.KnownPreset(name) }
@@ -32,9 +48,6 @@ func (m *Model) applyTheme(th Theme) {
 	stick := m.vp.Height == 0 || m.vp.AtBottom()
 	m.theme = th
 	styleComposer(&m.input, th)
-	// The terminal's own default colours are part of the theme, so the live
-	// preview has to move them too. A no-op unless Run attached a terminal.
-	m.term.apply(th)
 	m.setViewportContent(stick)
 }
 
@@ -67,7 +80,7 @@ func themeOrder(current string) []string {
 	return out
 }
 
-func (m Model) handleThemeDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) handleThemeDialogKey(msg keyInput) (tea.Model, tea.Cmd) {
 	n := len(m.themeNames)
 	if n == 0 {
 		return m.closeDialog(true), nil
@@ -75,17 +88,17 @@ func (m Model) handleThemeDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.themeSel < 0 || m.themeSel >= n {
 		m.themeSel = 0
 	}
-	switch msg.Type {
-	case tea.KeyEsc:
+	switch shortcut(msg) {
+	case "esc":
 		return m.closeDialog(true), nil
-	case tea.KeyEnter:
+	case "enter":
 		return m.keepTheme(), nil
-	case tea.KeyDown:
+	case "down":
 		m.themeSel = (m.themeSel + 1) % n
-	case tea.KeyUp:
+	case "up":
 		m.themeSel = (m.themeSel - 1 + n) % n
 	default:
-		s := msg.String()
+		s := shortcut(msg)
 		switch {
 		case s == "j":
 			m.themeSel = (m.themeSel + 1) % n
@@ -97,7 +110,7 @@ func (m Model) handleThemeDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.themeSel = i
-			m.applyTheme(Preset(m.themeNames[i]))
+			m.applyTheme(presetFor(m.themeNames[i], m.theme.profile))
 			return m.keepTheme(), nil
 		default:
 			return m, nil
@@ -105,7 +118,7 @@ func (m Model) handleThemeDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	// Moving the cursor re-themes the live screen, which is the whole point of
 	// the picker; nothing is written until Enter.
-	m.applyTheme(Preset(m.themeNames[m.themeSel]))
+	m.applyTheme(presetFor(m.themeNames[m.themeSel], m.theme.profile))
 	return m, nil
 }
 
@@ -128,7 +141,7 @@ func (m Model) setThemeNamed(name string) Model {
 		m.addError("theme " + sanitizeLine(name) + " is not a preset (" + strings.Join(ThemeNames(), ", ") + ")")
 		return m
 	}
-	th := Preset(name)
+	th := presetFor(name, m.theme.profile)
 	if th.Name == m.theme.Name {
 		return m
 	}
@@ -192,6 +205,6 @@ func (m Model) themeDialogClick(i int) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.themeSel = top + row
-	m.applyTheme(Preset(m.themeNames[m.themeSel]))
+	m.applyTheme(presetFor(m.themeNames[m.themeSel], m.theme.profile))
 	return m.keepTheme(), nil
 }

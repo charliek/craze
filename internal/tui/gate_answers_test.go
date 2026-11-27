@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/backend"
@@ -145,7 +145,7 @@ func TestAnEventNeverOvertakesAnEarlierKey(t *testing.T) {
 						return slices.ContainsFunc(evs, func(ev agent.Event) bool { return ev.Type == agent.EventQuestion })
 					})
 					r.noDrain = true
-					r.step(tea.KeyMsg{Type: tea.KeyCtrlL})
+					r.step(tea.KeyPressMsg{Code: 'l', Mod: tea.ModCtrl})
 					if !mode.sync && (r.m().gate == nil || len(r.calls) != 1) {
 						t.Fatalf("the Interject opened no gate (gate %v, %d calls)", r.m().gate, len(r.calls))
 					}
@@ -324,7 +324,7 @@ func maskedNoTurn(r *schedRun, inflight ...agent.Event) (openings, after []agent
 	if len(openings) != len(inflight) {
 		r.t.Fatalf("prepare: %d events in flight, want the %d openings", len(openings), len(inflight))
 	}
-	r.step(tea.KeyMsg{Type: tea.KeyEsc})
+	r.step(tea.KeyPressMsg{Code: tea.KeyEsc})
 	if len(r.cancels) != 1 || !r.m().cardMasking || r.m().cardMask != "" {
 		r.t.Fatalf("prepare: Esc handed back %d cancels, mask %v keyed %q", len(r.cancels), r.m().cardMasking, r.m().cardMask)
 	}
@@ -554,7 +554,7 @@ func TestAnInterjectionIsGivenItsMinute(t *testing.T) {
 	// Short from here, past the setup's own Submit (plan 032 X81).
 	shortDeadlines(t, 20*time.Millisecond, 5*time.Second)
 	r.f.inner.eng = slowInterject{Backend: r.m().eng, d: 200 * time.Millisecond}
-	r.step(tea.KeyMsg{Type: tea.KeyCtrlL})
+	r.step(tea.KeyPressMsg{Code: 'l', Mod: tea.ModCtrl})
 	if len(r.calls) != 1 {
 		t.Fatalf("the Interject issued %d gated calls", len(r.calls))
 	}
@@ -582,7 +582,7 @@ func TestAnInterjectionThatNeverAnswersKeepsTheDraft(t *testing.T) {
 			r.f.inner = plantShellResult(r.f.inner, "git status", "clean\n")
 			r.typeText("hi")
 			sb := r.stall("Interject", ran)
-			r.step(tea.KeyMsg{Type: tea.KeyCtrlL})
+			r.step(tea.KeyPressMsg{Code: 'l', Mod: tea.ModCtrl})
 			r.answerStalled(sb)
 			m := r.m()
 			if m.copyNote != noAnswerInterjectNote {
@@ -1050,8 +1050,8 @@ func TestTheEngineBackendRefusesAStaleEpochBeforeCallingTheEngine(t *testing.T) 
 // card's answer — a plan accepted, a question skipped, a permission allowed —
 // and an interjection.
 func answerSites() []chainSite {
-	esc := tea.KeyMsg{Type: tea.KeyEsc}
-	ctrlL := tea.KeyMsg{Type: tea.KeyCtrlL}
+	esc := tea.KeyPressMsg{Code: tea.KeyEsc}
+	ctrlL := tea.KeyPressMsg{Code: 'l', Mod: tea.ModCtrl}
 	return []chainSite{
 		{
 			name: "a plan accepted",
@@ -1126,7 +1126,7 @@ func maskSchedule(t *testing.T, live, sync bool, order []string) ([]frameState, 
 	r.step(eventMsg{ev: opening})
 	r.n++
 	arrivals := map[string]any{
-		"K": frameTokenMsg{msg: tea.KeyMsg{Type: tea.KeyDown}, n: r.n},
+		"K": frameTokenMsg{msg: tea.KeyPressMsg{Code: tea.KeyDown}, n: r.n},
 		"E": after,
 	}
 	if sync {

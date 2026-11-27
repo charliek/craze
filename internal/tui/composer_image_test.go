@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/backend"
@@ -338,7 +338,7 @@ func TestChipsNumberOnWithinADraft(t *testing.T) {
 	if got := m.input.Value(); got != "[Image #1] [Image #2] [Image #3]" {
 		t.Fatalf("the draft: %q", got)
 	}
-	m = pressKey(t, m, tea.KeyBackspace) // #3, whole
+	m = pressKey(t, m, "backspace") // #3, whole
 	m = pasteText(t, m, c)
 	if got := m.input.Value(); got != "[Image #1] [Image #2] [Image #4]" {
 		t.Fatalf("after deleting #3 and pasting again: %q", got)
@@ -396,16 +396,16 @@ func seeChip(t *testing.T) (Model, *Stub) {
 // carries no image. A label typed by hand is text, a character at a time.
 func TestBackspaceAndDeleteTakeAWholeChip(t *testing.T) {
 	m, stub := seeChip(t)
-	m = pressKey(t, m, tea.KeyBackspace)
+	m = pressKey(t, m, "backspace")
 	if m.input.Value() != "see " || len(m.images.list) != 0 {
 		t.Fatalf("Backspace at the chip's end: %q, %d images", m.input.Value(), len(m.images.list))
 	}
 	m = typeComposer(t, m, "[Image #7]")
-	m = pressKey(t, m, tea.KeyBackspace)
+	m = pressKey(t, m, "backspace")
 	if m.input.Value() != "see [Image #7" {
 		t.Fatalf("Backspace after a label typed by hand: %q", m.input.Value())
 	}
-	m = pressKey(t, m, tea.KeyEnter)
+	m = pressKey(t, m, "enter")
 	if sent := stub.Prompts(); len(sent) != 1 || sent[0] != "see [Image #7" {
 		t.Fatalf("the send after the Backspace: %q", sent)
 	}
@@ -413,9 +413,9 @@ func TestBackspaceAndDeleteTakeAWholeChip(t *testing.T) {
 	// Delete with the cursor at the chip's start.
 	m, _ = seeChip(t)
 	for range len("[Image #1]") {
-		m = pressKey(t, m, tea.KeyLeft)
+		m = pressKey(t, m, "left")
 	}
-	m = pressKey(t, m, tea.KeyDelete)
+	m = pressKey(t, m, "delete")
 	if m.input.Value() != "see " || len(m.images.list) != 0 {
 		t.Fatalf("Delete at the chip's start: %q, %d images", m.input.Value(), len(m.images.list))
 	}
@@ -423,10 +423,26 @@ func TestBackspaceAndDeleteTakeAWholeChip(t *testing.T) {
 	// Backspace inside a chip deletes a character, and the chip it broke
 	// takes its image with it (reconcile).
 	m, _ = seeChip(t)
-	m = pressKey(t, m, tea.KeyLeft)
-	m = pressKey(t, m, tea.KeyBackspace)
+	m = pressKey(t, m, "left")
+	m = pressKey(t, m, "backspace")
 	if m.input.Value() != "see [Image #]" || len(m.images.list) != 0 {
 		t.Fatalf("Backspace inside a chip: %q, %d images", m.input.Value(), len(m.images.list))
+	}
+}
+
+func TestBackspaceTakesOnlyTheSelectedPartOfAChip(t *testing.T) {
+	m, _ := seeChip(t)
+	m = pressKey(t, m, "left")
+	m = pressKey(t, m, "left")
+	for range 2 {
+		m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyRight, Mod: tea.ModShift})
+	}
+	if got := m.input.SelectedText(); got != "1]" {
+		t.Fatalf("selected %q, want the chip's last two characters", got)
+	}
+	m = pressKey(t, m, "backspace")
+	if got := m.input.Value(); got != "see [Image #" || len(m.images.list) != 0 {
+		t.Fatalf("after deleting the selection: %q, %d images", got, len(m.images.list))
 	}
 }
 
@@ -481,7 +497,7 @@ func TestSendWaitsForAChipBeingProcessed(t *testing.T) {
 		t.Fatalf("the status row does not say why:\n%s", plainView(held))
 	}
 	m = settleImages(t, held)
-	_ = pressKey(t, m, tea.KeyEnter)
+	_ = pressKey(t, m, "enter")
 	if sent := stub.Prompts(); len(sent) != 1 || len(sentImages(t, sent[0])) != 1 {
 		t.Fatalf("the send once processed: %q", sent)
 	}
@@ -540,7 +556,7 @@ func TestAStaleProcessResultIsDropped(t *testing.T) {
 	}
 
 	m, msg, _ = pendingChip(t)
-	m = pressKey(t, m, tea.KeyBackspace)
+	m = pressKey(t, m, "backspace")
 	m = deliver(t, m, msg)
 	if m.input.Value() != "" || len(m.images.list) != 0 || m.copyNote != "" {
 		t.Fatalf("a result for a deleted chip: draft %q, sidecar %+v, note %q", m.input.Value(), m.images.list, m.copyNote)
@@ -626,7 +642,7 @@ func TestADownscaledImageSaysSo(t *testing.T) {
 	if !strings.Contains(m.copyNote, "image #1 downscaled 2400×16 → 2000×13") {
 		t.Fatalf("the note: %q", m.copyNote)
 	}
-	_ = pressKey(t, m, tea.KeyEnter)
+	_ = pressKey(t, m, "enter")
 	refs := sentImages(t, stub.Prompts()[0])
 	if len(refs) != 1 || refs[0].OW != 2400 || refs[0].OH != 16 {
 		t.Fatalf("the envelope: %+v", refs)
@@ -889,7 +905,7 @@ func TestAnInterjectionSendsPathText(t *testing.T) {
 	m = settleImages(t, m)
 	path := m.images.list[0].path
 	m = typeComposer(t, m, " and this")
-	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlL})
+	tm, _ = m.Update(tea.KeyPressMsg{Code: 'l', Mod: tea.ModCtrl})
 	m = tm.(Model)
 	got := stub.Interjections()
 	if want := "[Image #1: " + path + "]\n[Image #1] and this"; len(got) != 1 || got[0] != want {
@@ -939,7 +955,7 @@ func TestAQueueEditRebuildsTheRowsImages(t *testing.T) {
 	}
 	// Delete #2 whole: the cursor after it.
 	m.input.SetValue("[Image #1] [Image #2]")
-	m = pressKey(t, m, tea.KeyBackspace)
+	m = pressKey(t, m, "backspace")
 	m = typeComposer(t, m, "only the first")
 	tm, _ := m.Update(enter())
 	m = tm.(Model)
@@ -990,7 +1006,7 @@ func TestThePastesThatAreNotTheComposersStayText(t *testing.T) {
 	if v, _ := inputOf(m); v != shot || len(m.images.list) != 0 || m.input.Value() != "" {
 		t.Fatalf("the list's input %q, composer %q, %d images", v, m.input.Value(), len(m.images.list))
 	}
-	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlV})
+	_, cmd := m.Update(tea.KeyPressMsg{Code: 'v', Mod: tea.ModCtrl})
 	runWork(t, cmd)
 	if reads != 0 {
 		t.Fatalf("Ctrl+V in the list's input read the clipboard's image %d times", reads)
@@ -1060,7 +1076,7 @@ func TestCtrlVAndAltVPasteTheClipboardsImage(t *testing.T) {
 	clipboardRead = func() (string, error) { return "the clipboard's text", nil }
 	t.Cleanup(func() { clipboardRead = prevText })
 
-	for _, key := range []tea.KeyMsg{{Type: tea.KeyCtrlV}, {Type: tea.KeyRunes, Runes: []rune{'v'}, Alt: true}} {
+	for _, key := range []tea.KeyPressMsg{{Code: 'v', Mod: tea.ModCtrl}, {Code: 'v', Mod: tea.ModAlt}} {
 		m, _ := imageModel(t)
 		tm, cmd := m.Update(key)
 		m = tm.(Model)
@@ -1076,7 +1092,7 @@ func TestCtrlVAndAltVPasteTheClipboardsImage(t *testing.T) {
 
 	m, _ := imageModel(t)
 	m.attachReads = false
-	tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlV})
+	tm, cmd := m.Update(tea.KeyPressMsg{Code: 'v', Mod: tea.ModCtrl})
 	m = deliver(t, tm.(Model), runCmd(cmd))
 	if m.input.Value() != "the clipboard's text" || len(m.images.list) != 0 || m.copyNote != p27ClipNote {
 		t.Fatalf("a refusing host: %q, %d images, note %q", m.input.Value(), len(m.images.list), m.copyNote)
@@ -1084,7 +1100,7 @@ func TestCtrlVAndAltVPasteTheClipboardsImage(t *testing.T) {
 
 	clipboardReadImage = func() ([]byte, error) { return nil, attach.ErrSourceTooLarge }
 	m, _ = imageModel(t)
-	tm, cmd = m.Update(tea.KeyMsg{Type: tea.KeyCtrlV})
+	tm, cmd = m.Update(tea.KeyPressMsg{Code: 'v', Mod: tea.ModCtrl})
 	m = deliver(t, tm.(Model), runCmd(cmd))
 	if m.input.Value() != "the clipboard's text" || !strings.Contains(m.copyNote, "the clipboard image was not pasted: larger than 20 MiB") {
 		t.Fatalf("an image over the cap: %q, note %q", m.input.Value(), m.copyNote)
@@ -1111,7 +1127,7 @@ func TestTheFrameRunnerWaitsForAChip(t *testing.T) {
 	tm, cmd := m.Update(pasteKey(shot))
 	m = tm.(Model)
 	run := mustCmd(t, cmd, "processCmd")
-	m = pressKey(t, m, tea.KeyBackspace)
+	m = pressKey(t, m, "backspace")
 	if len(m.images.list) != 0 || !m.imagesInFlight() {
 		t.Fatalf("a deleted chip whose processing runs: %d entries, in flight %v", len(m.images.list), m.imagesInFlight())
 	}
@@ -1263,7 +1279,7 @@ func TestAStaleProcessingIsSkippedBeforeItStarts(t *testing.T) {
 	waiting := make(chan tea.Msg, 1)
 	goRun(m.processCmd(second), waiting)
 	// [Image #2] goes, its processing still waiting for the lane.
-	m = pressKey(t, m, tea.KeyBackspace)
+	m = pressKey(t, m, "backspace")
 	if m.input.Value() != "[Image #1] " || len(m.images.list) != 1 {
 		t.Fatalf("after the backspace: %q, %d chips", m.input.Value(), len(m.images.list))
 	}
@@ -1378,7 +1394,7 @@ func TestAPanickingProcessingRevertsItsChip(t *testing.T) {
 	if !strings.Contains(m.copyNote, "image #1 not attached: craze could not process it (a decoder bug)") {
 		t.Fatalf("note %q", m.copyNote)
 	}
-	_ = pressKey(t, m, tea.KeyEnter)
+	_ = pressKey(t, m, "enter")
 	if sent := stub.Prompts(); len(sent) != 1 || sent[0] != shot {
 		t.Fatalf("the send after the revert: %q", sent)
 	}
@@ -1424,7 +1440,7 @@ func TestAChipTheEnvelopeCannotHoldStaysText(t *testing.T) {
 		t.Fatalf("the refused paste is not its path: %q", m.input.Value())
 	}
 	m.input.SetValue(strings.TrimSuffix(m.input.Value(), refusedPath))
-	_ = pressKey(t, m, tea.KeyEnter)
+	_ = pressKey(t, m, "enter")
 	sent := stub.Prompts()
 	if len(sent) != 1 {
 		t.Fatalf("sent %d prompts", len(sent))
@@ -1499,7 +1515,7 @@ func TestAPendingChipIsCountedAtItsMost(t *testing.T) {
 		t.Fatalf("the tenth chip was made: %d chips, draft %q", len(m.images.list), m.input.Value())
 	}
 	m.input.SetValue(strings.TrimSuffix(m.input.Value(), tenth))
-	_ = pressKey(t, m, tea.KeyEnter)
+	_ = pressKey(t, m, "enter")
 	if sent := stub.Prompts(); len(sent) != 1 || len(sentImages(t, sent[0])) != 9 {
 		t.Fatalf("sent %q", sent)
 	}

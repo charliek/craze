@@ -3,8 +3,6 @@ package tui
 import (
 	"context"
 
-	"github.com/charmbracelet/x/ansi"
-
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/host"
 )
@@ -90,12 +88,12 @@ func hostCard(c card) (host.Card, string) {
 // Derive applies the same bound again; the TUI applies it first so nothing
 // unsanitised ever enters host.Input.
 func hostMessage(s string) string {
-	return ansi.Truncate(sanitizeLine(s), host.MessageCap, "…")
+	return truncateCells(sanitizeLine(s), host.MessageCap, "…")
 }
 
 // hostMeta is a provider or model id as a host token: sanitised the same way,
 // which also trims it, and at most host.MetaCap cells, herdr's cap on a
 // metadata token value.
 func hostMeta(s string) string {
-	return ansi.Truncate(sanitizeLine(s), host.MetaCap, "…")
+	return truncateCells(sanitizeLine(s), host.MetaCap, "…")
 }

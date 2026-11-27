@@ -11,8 +11,10 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/colorprofile"
+
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/paths"
@@ -25,13 +27,13 @@ func TestParseFrameScriptTokens(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []tea.KeyMsg{
+	want := []tea.KeyPressMsg{
 		runeKey('a'),
 		runeKey('b'),
-		{Type: tea.KeyEnter},
-		{Type: tea.KeyCtrlO},
-		{Type: tea.KeyShiftTab},
-		{Type: tea.KeyEnter, Alt: true},
+		{Code: tea.KeyEnter},
+		{Code: 'o', Mod: tea.ModCtrl},
+		{Code: tea.KeyTab, Mod: tea.ModShift},
+		{Code: tea.KeyEnter, Mod: tea.ModAlt},
 		runeKey('<'),
 		runeKey(' '),
 	}
@@ -42,9 +44,19 @@ func TestParseFrameScriptTokens(t *testing.T) {
 		if tok.kind != tokKey {
 			t.Fatalf("token %d kind %v", i, tok.kind)
 		}
-		if tok.key.String() != want[i].String() || tok.key.Type != want[i].Type {
-			t.Fatalf("token %d = %q (%v), want %q (%v)", i, tok.key.String(), tok.key.Type, want[i].String(), want[i].Type)
+		if tok.key != want[i] {
+			t.Fatalf("token %d = %#v, want %#v", i, tok.key, want[i])
 		}
+	}
+}
+
+func TestFrameScriptKeepsTypedGraphemesWhole(t *testing.T) {
+	toks, err := parseFrameScript(keycapOne + decomposed + "<enter>")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(toks) != 3 || shortcut(toks[0].key) != keycapOne || shortcut(toks[1].key) != decomposed || shortcut(toks[2].key) != "enter" {
+		t.Fatalf("tokens %#v", toks)
 	}
 }
 
@@ -57,10 +69,10 @@ func TestParseFrameScriptNonKeyTokens(t *testing.T) {
 	if len(toks) != 11 {
 		t.Fatalf("got %d tokens", len(toks))
 	}
-	if mouseOf(t, toks[0]).Button != tea.MouseButtonWheelUp || mouseOf(t, toks[1]).Button != tea.MouseButtonWheelDown {
+	if mouseOf(t, toks[0]).Mouse().Button != tea.MouseWheelUp || mouseOf(t, toks[1]).Mouse().Button != tea.MouseWheelDown {
 		t.Fatalf("wheel tokens %+v %+v", toks[0].msgs, toks[1].msgs)
 	}
-	if mm := mouseOf(t, toks[2]); mm.X != 10 || mm.Y != 5 || mm.Button != tea.MouseButtonLeft {
+	if mm := mouseOf(t, toks[2]).Mouse(); mm.X != 10 || mm.Y != 5 || mm.Button != tea.MouseLeft {
 		t.Fatalf("click %+v", mm)
 	}
 	if toks[3].size.Width != 120 || toks[3].size.Height != 40 {
@@ -84,7 +96,7 @@ func TestParseFrameScriptNonKeyTokens(t *testing.T) {
 	}
 	// A hover is a motion with no button held, which is what all-motion
 	// reporting sends and what <motion:> (a drag) is not.
-	if mm := mouseOf(t, toks[10]); mm.X != 3 || mm.Y != 4 || mm.Button != tea.MouseButtonNone || mm.Action != tea.MouseActionMotion {
+	if mm := mouseOf(t, toks[10]); mm != (tea.MouseMotionMsg{X: 3, Y: 4, Button: tea.MouseNone}) {
 		t.Fatalf("hover token %+v", toks[10].msgs)
 	}
 }
@@ -114,10 +126,10 @@ func TestParseFrameScriptSelectionTokens(t *testing.T) {
 		t.Fatalf("got %d tokens", len(toks))
 	}
 	for i, want := range []tea.MouseMsg{
-		{X: 3, Y: 4, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress},
-		{X: 5, Y: 4, Button: tea.MouseButtonLeft, Action: tea.MouseActionMotion},
+		tea.MouseClickMsg{X: 3, Y: 4, Button: tea.MouseLeft},
+		tea.MouseMotionMsg{X: 5, Y: 4, Button: tea.MouseLeft},
 		// A release reports ButtonNone, the way an X10 terminal does.
-		{X: 7, Y: 6, Button: tea.MouseButtonNone, Action: tea.MouseActionRelease},
+		tea.MouseReleaseMsg{X: 7, Y: 6, Button: tea.MouseNone},
 	} {
 		if got := mouseOf(t, toks[i]); got != want {
 			t.Fatalf("token %d = %+v, want %+v", i, got, want)
@@ -129,9 +141,9 @@ func TestParseFrameScriptSelectionTokens(t *testing.T) {
 		t.Fatalf("<drag:> sent %d messages, want 3", len(drag.msgs))
 	}
 	for i, want := range []tea.MouseMsg{
-		{X: 1, Y: 2, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress},
-		{X: 8, Y: 9, Button: tea.MouseButtonLeft, Action: tea.MouseActionMotion},
-		{X: 8, Y: 9, Button: tea.MouseButtonLeft, Action: tea.MouseActionRelease},
+		tea.MouseClickMsg{X: 1, Y: 2, Button: tea.MouseLeft},
+		tea.MouseMotionMsg{X: 8, Y: 9, Button: tea.MouseLeft},
+		tea.MouseReleaseMsg{X: 8, Y: 9, Button: tea.MouseLeft},
 	} {
 		if got := drag.msgs[i].(tea.MouseMsg); got != want {
 			t.Fatalf("drag message %d = %+v, want %+v", i, got, want)
@@ -154,7 +166,7 @@ func TestParseFrameScriptPaste(t *testing.T) {
 		t.Fatalf("got %+v", toks)
 	}
 	key := toks[0].key
-	if !key.Paste || key.Type != tea.KeyRunes || string(key.Runes) != "one\ntwo" {
+	if key != (tea.PasteMsg{Content: "one\ntwo"}) {
 		t.Fatalf("paste token is %+v, want one bracketed paste of two lines", key)
 	}
 }
@@ -386,8 +398,8 @@ func runStubFrame(t *testing.T, cols, rows int, script string) string {
 }
 
 // runStubFrameRaw is runStubFrame with the raw frame kept, so a test can assert
-// on the escape sequences as well as the text. TestMain already forces a
-// true-colour profile, so the raw frame carries real colours.
+// on the escape sequences as well as the text. Request full color independently
+// of the current terminal, just as the CLI’s --ansi option does.
 func runStubFrameRaw(t *testing.T, cols, rows int, script string) (string, string) {
 	t.Helper()
 	isolateSkillsHome(t)
@@ -399,7 +411,7 @@ func runStubFrameRaw(t *testing.T, cols, rows int, script string) (string, strin
 			Model:     "grok",
 			Yolo:      true,
 		}
-	}, cols, rows, script, FrameOpts{Timeout: 10 * time.Second})
+	}, cols, rows, script, FrameOpts{Timeout: 10 * time.Second, ANSI: true})
 	if err != nil {
 		t.Fatalf("run frame script: %v", err)
 	}
@@ -1636,7 +1648,7 @@ func TestFrameGoldenSelectStyledRow(t *testing.T) {
 			Yolo:      true,
 		}
 	}, 100, 30, "<wait:idle>go<enter><wait:text:done diff><wait:idle><ctrl-o>"+
-		"<wait:text:package main><drag:5,10,45,11><wait:copied>", FrameOpts{Timeout: 15 * time.Second})
+		"<wait:text:package main><drag:5,10,45,11><wait:copied>", FrameOpts{Timeout: 15 * time.Second, ANSI: true})
 	if err != nil {
 		t.Fatalf("run diff frame: %v", err)
 	}
@@ -1651,7 +1663,7 @@ func TestFrameGoldenSelectStyledRow(t *testing.T) {
 // which is the only place the highlight exists: the goldens are stripped.
 func assertSelected(t *testing.T, raw string, on, off [][2]int) {
 	t.Helper()
-	bg := selectionSeq(lipgloss.ColorProfile(), Preset("tokyo-night").SelectionBG)
+	bg := selectionSeq(colorprofile.TrueColor, Preset("tokyo-night").SelectionBG)
 	if bg == "" {
 		t.Skip("no colour profile")
 	}

@@ -4,6 +4,7 @@ version = "0.0.0"
 description = "Headless CLI tests for craze against craze-fake-agent"
 requires-python = ">=3.11"
 dependencies = [
+    "pyte>=0.8.2,<0.9",
     "pytest>=8",
 ]
 

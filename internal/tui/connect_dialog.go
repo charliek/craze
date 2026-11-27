@@ -8,8 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/charmbracelet/bubbles/textinput"
-	tea "github.com/charmbracelet/bubbletea"
+	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/backend"
@@ -565,7 +565,7 @@ func (m Model) pasteIntoKey(msg pasteMsg) Model {
 	if msg.text == "" || m.dialog != dialogConnect || m.cdlg.openField() != msg.key || m.cdlg.signIn.handed {
 		return m
 	}
-	m.cdlg.key, _ = m.cdlg.key.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(msg.text), Paste: true})
+	m.cdlg.key, _ = m.cdlg.key.Update(tea.PasteMsg{Content: msg.text})
 	m.cdlg.keyErr = ""
 	return m
 }
@@ -579,7 +579,7 @@ func (m Model) pasteIntoKey(msg pasteMsg) Model {
 // The pre-session dialog's own steps (plan 036 §3.6: saving, finishing, the
 // notice) have keys of their own (handlePreStepKey); its Esc, on any step,
 // never reaches here (handlePreConnectKey).
-func (m Model) handleConnectDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) handleConnectDialogKey(msg keyInput) (tea.Model, tea.Cmd) {
 	switch m.cdlg.step {
 	case connectKey:
 		return m.handleConnectKeyStep(msg)
@@ -589,16 +589,16 @@ func (m Model) handleConnectDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handlePreStepKey(msg)
 	}
 	n := len(m.cdlg.providers)
-	switch msg.Type {
-	case tea.KeyEsc:
+	switch shortcut(msg) {
+	case "esc":
 		return m.closeDialog(true), nil
-	case tea.KeyEnter:
+	case "enter":
 		return m.pickConnectProvider()
-	case tea.KeyUp, tea.KeyShiftTab:
+	case "up", "shift+tab":
 		if n > 0 {
 			m.cdlg.sel = (m.cdlg.sel - 1 + n) % n
 		}
-	case tea.KeyDown, tea.KeyTab:
+	case "down", "tab":
 		if n > 0 {
 			m.cdlg.sel = (m.cdlg.sel + 1) % n
 		}
@@ -628,14 +628,14 @@ func (m Model) openKeyStep() Model {
 // back to step one, Ctrl+V pastes the clipboard into this field and no
 // other, and every other key — a terminal's bracketed paste among them — is
 // the field's.
-func (m Model) handleConnectKeyStep(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.Type {
-	case tea.KeyEsc:
+func (m Model) handleConnectKeyStep(msg keyInput) (tea.Model, tea.Cmd) {
+	switch shortcut(msg) {
+	case "esc":
 		m.cdlg = m.cdlg.leaveKeyStep()
 		return m, nil
-	case tea.KeyEnter:
+	case "enter":
 		return m.saveConnect()
-	case tea.KeyCtrlV:
+	case "ctrl+v":
 		return m, pasteFromClipboardForKey(m.shownGen, m.cdlg.openField())
 	}
 	before := m.cdlg.key.Value()

@@ -12,8 +12,8 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 )
 
 // The completion component (plan 030 §3.15): one popup, reused by every input
@@ -857,21 +857,21 @@ type completeChoice struct {
 //
 // A refusal the owner drew (refuse) lasts until this next key, whichever it
 // is.
-func (p *completePopup) key(msg tea.KeyMsg) (choice completeChoice, handled bool) {
+func (p *completePopup) key(msg keyInput) (choice completeChoice, handled bool) {
 	if !p.open {
 		return completeChoice{}, false
 	}
 	if p.refused() {
 		p.ans.Note, p.ans.NoteErr = "", false
 	}
-	switch msg.Type {
-	case tea.KeyUp, tea.KeyCtrlP:
+	switch shortcut(msg) {
+	case "up", "ctrl+p":
 		p.move(-1)
 		return completeChoice{}, true
-	case tea.KeyDown, tea.KeyCtrlN:
+	case "down", "ctrl+n":
 		p.move(1)
 		return completeChoice{}, true
-	case tea.KeyTab:
+	case "tab":
 		it, ok := p.selected()
 		if !ok {
 			return completeChoice{}, true
@@ -880,16 +880,13 @@ func (p *completePopup) key(msg tea.KeyMsg) (choice completeChoice, handled bool
 			return p.choose(completeDescended, it), true
 		}
 		return p.choose(completeAccepted, it), true
-	case tea.KeyEnter:
-		if msg.Alt {
-			return completeChoice{}, false
-		}
+	case "enter":
 		it, ok := p.selected()
 		if !ok {
 			return completeChoice{}, false
 		}
 		return p.choose(completeAccepted, it), true
-	case tea.KeyEsc:
+	case "esc":
 		p.hideKey, p.hideEnv = p.tokKey, p.env
 		p.close()
 		return completeChoice{}, true

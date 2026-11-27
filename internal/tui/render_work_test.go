@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/charliek/craze/internal/agent"
 )
@@ -192,7 +192,7 @@ func TestAReplayPaintsEvery256thEventAndWhenForced(t *testing.T) {
 			do   func(m *Model) bool
 		}{
 			{"a resize", func(m *Model) bool { return step(t, m, tea.WindowSizeMsg{Width: 100, Height: 30}) }},
-			{"Ctrl+O", func(m *Model) bool { return step(t, m, tea.KeyMsg{Type: tea.KeyCtrlO}) }},
+			{"Ctrl+O", func(m *Model) bool { return step(t, m, tea.KeyPressMsg{Code: 'o', Mod: tea.ModCtrl}) }},
 			{"a theme", func(m *Model) bool {
 				before := m.main.work.paints
 				m.applyTheme(Preset("gruvbox"))
@@ -206,7 +206,7 @@ func TestAReplayPaintsEvery256thEventAndWhenForced(t *testing.T) {
 			}},
 			{"a press into the transcript", func(m *Model) bool {
 				tr := m.lay.Region(regionTranscript)
-				return step(t, m, tea.MouseMsg{X: 2, Y: tr.Top, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+				return step(t, m, tea.MouseClickMsg{X: 2, Y: tr.Top, Button: tea.MouseLeft})
 			}},
 			{"a restore", func(m *Model) bool {
 				snap, err := m.shared.Snapshot(0)

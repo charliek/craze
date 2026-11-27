@@ -2,10 +2,6 @@ package tui
 
 import (
 	"strings"
-
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
-	"github.com/charmbracelet/x/ansi"
 )
 
 // The cursor remembers the selected pane entry across paints.
@@ -90,9 +86,9 @@ func (m *Model) focusNearTop() {
 
 // transcriptKey runs after modal, confirmation, and side-view dispatch. It
 // handles both the main and subagent pane without taking the composer's draft.
-func (m *Model) transcriptKey(msg tea.KeyMsg) bool {
-	switch msg.Type {
-	case tea.KeyF2:
+func (m *Model) transcriptKey(msg keyInput) bool {
+	switch shortcut(msg) {
+	case "f2":
 		m.inspector = transcriptInspector{}
 		switch m.transcriptLayout {
 		case layoutGrouped:
@@ -105,7 +101,7 @@ func (m *Model) transcriptKey(msg tea.KeyMsg) bool {
 		m.showTranscriptLayout = true
 		m.refreshViewport()
 		return true
-	case tea.KeyF4:
+	case "f4":
 		if m.inspector.active {
 			m.inspector = transcriptInspector{}
 		} else {
@@ -117,24 +113,24 @@ func (m *Model) transcriptKey(msg tea.KeyMsg) bool {
 	if !m.inspector.active {
 		return false
 	}
-	if msg.Type == tea.KeyEsc {
+	if shortcut(msg) == "esc" {
 		m.inspector = transcriptInspector{}
 		return true
 	}
 	m.catchUp()
 	x := m.vp.rows
 	i := m.visibleTarget()
-	switch msg.Type {
-	case tea.KeyCtrlO, tea.KeyCtrlG, tea.KeyCtrlY, tea.KeyCtrlT:
+	switch shortcut(msg) {
+	case "ctrl+o", "ctrl+g", "ctrl+y", "ctrl+t":
 		return false // existing pane shortcuts
-	case tea.KeyPgUp, tea.KeyPgDown:
+	case "pgup", "pgdown":
 		m.vp, _ = m.vp.Update(msg)
 		m.storeViewport(m.cur())
-	case tea.KeyUp, tea.KeyDown, tea.KeyEnter:
+	case "up", "down", "enter":
 		if i < 0 {
-			if x != nil && x.total > 0 && msg.Type != tea.KeyEnter {
+			if x != nil && x.total > 0 && shortcut(msg) != "enter" {
 				_, at := x.find(min(m.vp.YOffset, x.total-1))
-				if msg.Type == tea.KeyUp {
+				if shortcut(msg) == "up" {
 					m.focusTarget(at, -1)
 				} else {
 					m.focusTarget(at+1, 1)
@@ -143,12 +139,12 @@ func (m *Model) transcriptKey(msg tea.KeyMsg) bool {
 			break
 		}
 		m.inspector.entry = x.span(i).e
-		switch msg.Type {
-		case tea.KeyUp:
+		switch shortcut(msg) {
+		case "up":
 			m.focusTarget(i-1, -1)
-		case tea.KeyDown:
+		case "down":
 			m.focusTarget(i+1, 1)
-		case tea.KeyEnter:
+		case "enter":
 			if !m.expanded {
 				e := x.span(i).e
 				e.detailOpen = !e.detailOpen
@@ -180,8 +176,8 @@ func (m Model) inspectedViewport() string {
 	}
 	rows := strings.Split(view, "\n")
 	if line < len(rows) {
-		header := padRow(ansi.Truncate(rows[line], m.vp.Width-2, ""), m.vp.Width-2) + " ◀"
-		rows[line] = highlightSpan(header, 0, m.vp.Width-1, selectionSeq(lipgloss.ColorProfile(), m.theme.SelectionBG))
+		header := padRow(truncateCells(rows[line], m.vp.Width-2, ""), m.vp.Width-2) + " ◀"
+		rows[line] = highlightSpan(header, 0, m.vp.Width-1, selectionSeq(m.theme.profile, m.theme.SelectionBG))
 	}
 	return strings.Join(rows, "\n")
 }

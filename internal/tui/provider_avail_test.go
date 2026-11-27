@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/backend"
@@ -206,9 +206,9 @@ func TestProviderPickerDrawsTheStates(t *testing.T) {
 	}
 	const fix1, fix2 = "install cursor-agent, or set [agents].cursor in", "~/.craze/config.toml"
 	lines(m, "on cursor", dim.Render(availCursorReason), dim.Render(fix1), dim.Render(fix2))
-	onGrok, _ := press(m, tea.KeyMsg{Type: tea.KeyDown})
+	onGrok, _ := press(m, tea.KeyPressMsg{Code: tea.KeyDown})
 	lines(onGrok, "on grok, ready", "", "", "")
-	onNative, _ := press(onGrok, tea.KeyMsg{Type: tea.KeyDown})
+	onNative, _ := press(onGrok, tea.KeyPressMsg{Code: tea.KeyDown})
 	lines(onNative, "on native", dim.Render(availNativeReason), dim.Render(availNativeFix), "")
 
 	// A refusal takes the first line, in the error colour, its fix under it —
@@ -219,7 +219,7 @@ func TestProviderPickerDrawsTheStates(t *testing.T) {
 	if next.providerErr != availCursorRefusal {
 		t.Errorf("the refusal kept is %q, want it whole: %q", next.providerErr, availCursorRefusal)
 	}
-	next, _ = press(onGrok, tea.KeyMsg{Type: tea.KeyEsc})
+	next, _ = press(onGrok, tea.KeyPressMsg{Code: tea.KeyEsc})
 	lines(next, "Esc from grok", errSt.Render(refusedHead), dim.Render(fix1), dim.Render(fix2))
 	// The command line's refusal has no fix: it wraps over two rows, the
 	// third blank.
@@ -247,7 +247,7 @@ func TestProviderPickerDrawsTheStates(t *testing.T) {
 func TestProviderPickerFixLineGoesFirst(t *testing.T) {
 	log := &builtLog{}
 	m := availPicker(t, availPickerConfig(t, agent.CursorProvider(), availFixture, nil, log.build), 80, 24)
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyUp}) // native, the last row
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyUp}) // native, the last row
 	inner := dialogMaxWidth - dialogBorder
 	if all, heads := m.providerDetailRows(inner); all != 3 || heads != 1 {
 		t.Fatalf("fixture: the detail lines are %d rows, %d of them first parts; want 3 and 1", all, heads)
@@ -349,15 +349,15 @@ func TestProviderPickerRefusesWhatCannotStart(t *testing.T) {
 	}
 	next, cmd := press(m, enter())
 	refused("Enter on cursor", next, cmd, availCursorRefusal)
-	next, cmd = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	next, cmd = press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 	refused("Esc to the default", next, cmd, availCursorRefusal)
 	// From grok too: Esc is the default's, wherever the cursor is.
-	onGrok, _ := press(m, tea.KeyMsg{Type: tea.KeyDown})
-	next, cmd = press(onGrok, tea.KeyMsg{Type: tea.KeyEsc})
+	onGrok, _ := press(m, tea.KeyPressMsg{Code: tea.KeyDown})
+	next, cmd = press(onGrok, tea.KeyPressMsg{Code: tea.KeyEsc})
 	refused("Esc from grok", next, cmd, availCursorRefusal)
-	tm, cmd := m.Update(tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: 0, Y: 0})
+	tm, cmd := m.Update(tea.MouseClickMsg{Button: tea.MouseLeft, X: 0, Y: 0})
 	refused("a click outside the box", tm.(Model), cmd, availCursorRefusal)
-	onNative, _ := press(m, tea.KeyMsg{Type: tea.KeyUp})
+	onNative, _ := press(m, tea.KeyPressMsg{Code: tea.KeyUp})
 	next, _ = press(onNative, enter())
 	if !next.preConnectOpen() || !next.pickingProvider || next.providerErr != "" || len(log.got()) != 0 {
 		t.Fatalf("Enter on native: connect dialog %v, picking %v, error row %q, built %v — want the pre-session dialog over the picker",
@@ -366,7 +366,7 @@ func TestProviderPickerRefusesWhatCannotStart(t *testing.T) {
 
 	// Moving off the refused row clears it, and Enter on grok starts grok.
 	next, _ = press(m, enter())
-	next, _ = press(next, tea.KeyMsg{Type: tea.KeyDown})
+	next, _ = press(next, tea.KeyPressMsg{Code: tea.KeyDown})
 	if next.providerErr != "" {
 		t.Fatalf("the cursor moved and the refusal stayed: %q", next.providerErr)
 	}
@@ -390,7 +390,7 @@ func TestProviderPickerRefuseLoadComesFirst(t *testing.T) {
 		return nil
 	}
 	m := availPicker(t, cfg, 80, 24)
-	onNative, _ := press(m, tea.KeyMsg{Type: tea.KeyUp})
+	onNative, _ := press(m, tea.KeyPressMsg{Code: tea.KeyUp})
 	next, _ := press(onNative, enter())
 	if next.providerErr != refusal {
 		t.Fatalf("native, refused by both: %q, want the command line's", next.providerErr)
@@ -417,7 +417,7 @@ func TestProviderPickerEveryRowUnavailable(t *testing.T) {
 	for i, p := range m.providers {
 		at := m
 		for range i {
-			at, _ = press(at, tea.KeyMsg{Type: tea.KeyDown})
+			at, _ = press(at, tea.KeyPressMsg{Code: tea.KeyDown})
 		}
 		next, cmd := press(at, enter())
 		if !next.pickingProvider || cmd != nil || !strings.HasPrefix(next.providerErr, "can't start "+p.DisplayName()+": ") {
@@ -425,8 +425,8 @@ func TestProviderPickerEveryRowUnavailable(t *testing.T) {
 		}
 	}
 	for how, k := range map[string]tea.Msg{
-		"Esc":                     tea.KeyMsg{Type: tea.KeyEsc},
-		"a click outside the box": tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: 0, Y: 0},
+		"Esc":                     tea.KeyPressMsg{Code: tea.KeyEsc},
+		"a click outside the box": tea.MouseClickMsg{Button: tea.MouseLeft, X: 0, Y: 0},
 	} {
 		tm, cmd := m.Update(k)
 		if next := tm.(Model); !next.pickingProvider || cmd != nil || next.providerErr != availCursorRefusal {
@@ -436,7 +436,7 @@ func TestProviderPickerEveryRowUnavailable(t *testing.T) {
 	if got := log.got(); len(got) != 0 {
 		t.Fatalf("built sessions of %v", got)
 	}
-	next, cmd := press(m, tea.KeyMsg{Type: tea.KeyCtrlC})
+	next, cmd := press(m, tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
 	if !next.quitting || cmd == nil {
 		t.Fatalf("Ctrl+C: quitting %v, command %v", next.quitting, cmd != nil)
 	}
@@ -478,8 +478,8 @@ func TestProviderPickerAsksOffTheUpdate(t *testing.T) {
 	// ready — no detail line — and Enter on cursor would start it.
 	done := make(chan Model, 1)
 	go func() {
-		next, _ := press(m, tea.KeyMsg{Type: tea.KeyDown})
-		next, _ = press(next, tea.KeyMsg{Type: tea.KeyUp})
+		next, _ := press(m, tea.KeyPressMsg{Code: tea.KeyDown})
+		next, _ = press(next, tea.KeyPressMsg{Code: tea.KeyUp})
 		_ = plainView(next)
 		done <- next
 	}()
@@ -530,7 +530,7 @@ func TestProviderPickerTakesOnlyTheLatestAnswer(t *testing.T) {
 		tm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 		m = tm.(Model)
 		stale := runWatched(t, m.Init()).(providerAvailMsg)
-		m, _ = press(m, tea.KeyMsg{Type: tea.KeyDown})
+		m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyDown})
 		return m, stale, &answer
 	}
 	// confirm is Enter on grok: the spawn's command, the picker closed.
@@ -659,7 +659,7 @@ func availListModel(t *testing.T, answer []ProviderAvail) (Model, *availSessions
 // availability read the caller runs (mustCmd "readSessAvail") or not.
 func openAvailList(t *testing.T, m Model, as *availSessions) (Model, tea.Cmd) {
 	t.Helper()
-	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyLeft})
+	m, cmd := press(m, tea.KeyPressMsg{Code: tea.KeyLeft})
 	if !m.sessList.open || !m.sessList.in.on {
 		t.Fatalf("← did not open a list with an input:\n%s", plainView(m))
 	}
@@ -735,20 +735,20 @@ func TestSessProviderDimsAndRefuses(t *testing.T) {
 		if !strings.Contains(view, "  "+availCursorRefusal[:40]) {
 			t.Fatalf("%s: the refusal is not on screen:\n%s", how, view)
 		}
-		if !strings.Contains(m.View(), ansiFG(m.theme.Err.TrueColor)+"  can't start") {
+		if !strings.Contains(m.View().Content, ansiFG(depthHex(m.theme.Err))+"  can't start") {
 			t.Fatalf("%s: the refusal is not in the error colour", how)
 		}
 	}
 	next, _ := press(m, enter())
 	refused("Enter on cursor", next)
 	// The next key ends it.
-	moved, _ := press(next, tea.KeyMsg{Type: tea.KeyDown})
+	moved, _ := press(next, tea.KeyPressMsg{Code: tea.KeyDown})
 	if moved.sessList.in.cmd.ans.Note != "" || strings.Contains(plainView(moved), "can't start") {
 		t.Fatalf("the refusal outlived the next key: %q", moved.sessList.in.cmd.ans.Note)
 	}
-	next, _ = press(m, tea.KeyMsg{Type: tea.KeyTab})
+	next, _ = press(m, tea.KeyPressMsg{Code: tea.KeyTab})
 	refused("Tab on cursor", next)
-	onNative, _ := press(m, tea.KeyMsg{Type: tea.KeyUp})
+	onNative, _ := press(m, tea.KeyPressMsg{Code: tea.KeyUp})
 	next, _ = press(onNative, enter())
 	if !next.preConnectOpen() || next.sessList.open || !reflect.DeepEqual(next.sessPick, pickBefore) {
 		t.Fatalf("Enter on native: connect dialog %v, list open %v, pick %+v — want the pre-session dialog, nothing taken",
@@ -756,7 +756,7 @@ func TestSessProviderDimsAndRefuses(t *testing.T) {
 	}
 
 	// A ready one is taken.
-	onGrok, _ := press(m, tea.KeyMsg{Type: tea.KeyDown})
+	onGrok, _ := press(m, tea.KeyPressMsg{Code: tea.KeyDown})
 	next, _ = press(onGrok, enter())
 	if !next.sessPick.provSet || next.sessPick.prov.Name() != "grok" {
 		t.Fatalf("Enter on grok: pick %+v", next.sessPick)
@@ -766,7 +766,7 @@ func TestSessProviderDimsAndRefuses(t *testing.T) {
 	// left as typed and the pick as it was.
 	typed := clearInput(t, next)
 	typed, _ = typeList(t, typed, "/provider cursor")
-	typed, _ = press(typed, tea.KeyMsg{Type: tea.KeyEsc})
+	typed, _ = press(typed, tea.KeyPressMsg{Code: tea.KeyEsc})
 	if typed.sessList.in.cmd.visible() {
 		t.Fatal("fixture: esc left the popup up")
 	}
@@ -787,7 +787,7 @@ func TestSessProviderTypedBeforeAnyAnswer(t *testing.T) {
 	m, as := availListModel(t, availFixture())
 	m, _ = openAvailList(t, m, as) // its read never delivered
 	m, _ = typeList(t, m, "/provider cursor")
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 	m, _ = press(m, enter())
 	if !m.sessPick.provSet || m.sessPick.prov.Name() != "cursor" || m.sessList.noteKind == sessNoteErr {
 		t.Fatalf("typed before any answer: pick %+v, note %q", m.sessPick, m.sessList.note)
@@ -825,7 +825,7 @@ func TestSessProviderRecomputesAtEachOpening(t *testing.T) {
 	}
 	m = clearInput(t, m)
 	m, _ = typeList(t, m, "/provider grok")
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 	m, _ = press(m, enter())
 	if m.sessPick.prov.Name() != "grok" {
 		t.Fatalf("typed /provider grok with grok installed: pick %+v, note %q", m.sessPick, m.sessList.note)
@@ -839,7 +839,7 @@ func TestSessProviderRecomputesAtEachOpening(t *testing.T) {
 	}
 	m = clearInput(t, m)
 	m, _ = typeList(t, m, "/provider grok")
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 	m, _ = press(m, enter())
 	if m.sessList.note != "no provider grok: one of cursor, native" {
 		t.Fatalf("typed /provider grok with grok gone: note %q", m.sessList.note)
@@ -848,7 +848,7 @@ func TestSessProviderRecomputesAtEachOpening(t *testing.T) {
 	// The list opened again reads the answer as it stands then.
 	as.set(withGrok)
 	m = clearInput(t, m)
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 	if m.sessList.open {
 		t.Fatal("fixture: esc did not leave the list")
 	}
@@ -888,7 +888,7 @@ func TestSessProviderAsksOffTheUpdate(t *testing.T) {
 	}
 	done := make(chan Model, 1)
 	go func() {
-		next, _ := press(m, tea.KeyMsg{Type: tea.KeyDown})
+		next, _ := press(m, tea.KeyPressMsg{Code: tea.KeyDown})
 		_ = plainView(next)
 		done <- next
 	}()
@@ -953,7 +953,7 @@ func TestSessProviderTakesNoStaleAnswer(t *testing.T) {
 	m3, as3 := availListModel(t, older)
 	m3, open3 := openAvailList(t, m3, as3)
 	staleList := runWatched(t, mustCmd(t, open3, "readSessAvail")).(sessAvailMsg)
-	m3, _ = press(m3, tea.KeyMsg{Type: tea.KeyEsc})
+	m3, _ = press(m3, tea.KeyPressMsg{Code: tea.KeyEsc})
 	as3.set(newer)
 	m3, open3 = openAvailList(t, m3, as3)
 	tm, _ = m3.Update(staleList)
@@ -987,7 +987,7 @@ func TestCompletePopupKeepsARefusalsLine(t *testing.T) {
 	if len(lines) != 3 || strings.TrimSpace(plain(lines[2])) != "can't start a: gone" {
 		t.Fatalf("the view: %q", lines)
 	}
-	p.key(tea.KeyMsg{Type: tea.KeyDown})
+	p.key(tea.KeyPressMsg{Code: tea.KeyDown})
 	if p.refused() || p.shape(40, 3).note != 0 {
 		t.Fatal("the next key left the refusal")
 	}
@@ -1042,7 +1042,7 @@ func TestProviderPickerRowsFollowTheAnswers(t *testing.T) {
 		}
 		m, _ = preOpen(t, returnPicker, m)
 		installed.Store(false) // grok's binary removed while the dialog is up
-		m, cmd := press(m, tea.KeyMsg{Type: tea.KeyEsc})
+		m, cmd := press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 		m = preBack(t, "Esc", returnPicker, m, cmd, connectBack{}, listShown{})
 		if got := pickerRowNames(m); !slices.Equal(got, []string{"cursor", "native"}) {
 			t.Fatalf("after the fresh answer the rows are %v; want grok gone", got)
@@ -1052,7 +1052,7 @@ func TestProviderPickerRowsFollowTheAnswers(t *testing.T) {
 		}
 		// Every row Enter can reach: none is grok.
 		for range m.providers {
-			m, _ = press(m, tea.KeyMsg{Type: tea.KeyDown})
+			m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyDown})
 			if m.providers[m.providerCursor].Name() == "grok" {
 				t.Fatal("the cursor reached a grok row")
 			}
@@ -1067,7 +1067,7 @@ func TestProviderPickerRowsFollowTheAnswers(t *testing.T) {
 		tm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 		m = tm.(Model)
 		answer := runWatched(t, m.Init()).(providerAvailMsg)
-		m, _ = press(m, tea.KeyMsg{Type: tea.KeyDown}) // cursor → grok, before the answer
+		m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyDown}) // cursor → grok, before the answer
 		if m.providers[m.providerCursor].Name() != "grok" {
 			t.Fatalf("fixture: the cursor is on %s", m.providers[m.providerCursor].Name())
 		}
@@ -1099,7 +1099,7 @@ func TestProviderPickerRowsFollowTheAnswers(t *testing.T) {
 		if !slices.Contains(pickerRowNames(m), "grok") || c.a.State != AvailUnavailable || c.a.Reason != availUnlistedReason {
 			t.Fatalf("rows %v, grok %+v — want the default kept, unavailable", pickerRowNames(m), c.a)
 		}
-		next, _ := press(m, tea.KeyMsg{Type: tea.KeyEsc})
+		next, _ := press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 		if !next.pickingProvider || len(log.got()) != 0 || !strings.HasPrefix(next.providerErr, "can't start grok: ") {
 			t.Fatalf("Esc to the unlisted default: picking %v, built %v, error %q", next.pickingProvider, log.got(), next.providerErr)
 		}
@@ -1115,8 +1115,8 @@ func TestProviderPickerRowsFollowTheAnswers(t *testing.T) {
 		if got := pickerRowNames(m); !slices.Equal(got, []string{"grok"}) || m.providerChoice(grok).a.State != AvailUnavailable {
 			t.Fatalf("rows %v, grok %+v — want the default alone, unavailable", got, m.providerChoice(grok).a)
 		}
-		for _, key := range []tea.KeyType{tea.KeyEnter, tea.KeyEsc} {
-			next, _ := press(m, tea.KeyMsg{Type: key})
+		for _, key := range []string{"enter", "esc"} {
+			next, _ := press(m, testKey(key))
 			if !next.pickingProvider || len(log.got()) != 0 {
 				t.Fatalf("%v on the lone default: picking %v, built %v — want it refused", key, next.pickingProvider, log.got())
 			}
@@ -1130,7 +1130,7 @@ func TestProviderPickerRowsFollowTheAnswers(t *testing.T) {
 			!m.providerChoice(hidden).a.ready() {
 			t.Fatalf("rows %v, the hidden default %+v — want it kept, last, ready", got, m.providerChoice(hidden).a)
 		}
-		next, _ := press(m, tea.KeyMsg{Type: tea.KeyEsc})
+		next, _ := press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 		if next.pickingProvider || !slices.Equal(log.got(), []string{hidden.Name()}) {
 			t.Fatalf("Esc to the hidden default: picking %v, built %v — want it started", next.pickingProvider, log.got())
 		}

@@ -1,7 +1,7 @@
 package tui
 
 import (
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 )
 
 // The composer's `@` popup (plan 030 §3.16, owner decision 10): a file or a
@@ -174,7 +174,7 @@ func (m *Model) syncComposerAt() tea.Cmd {
 // popup with it (closed past an accept's space, open on a descended
 // directory). A key the popup does not name, and enter with no candidate to
 // accept, is not handled: it is the composer's.
-func (m Model) composerAtKey(msg tea.KeyMsg) (Model, bool) {
+func (m Model) composerAtKey(msg keyInput) (Model, bool) {
 	if !m.composerAtActive() {
 		return m, false
 	}
