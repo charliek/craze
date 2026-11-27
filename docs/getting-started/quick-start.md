@@ -133,6 +133,10 @@ clipboard into the composer ([Images](../reference/tui.md#images)).
 craze refuses to start the TUI on a non-tty. For a scripted turn, use
 [`craze prompt`](../reference/cli.md#craze-prompt).
 
+Run `craze review --changes-since HEAD` to review your staged, unstaged and untracked work. [Review command](../reference/cli.md#craze-review)
+
+Use `craze resolve --target sol` to see the first available model route and the fallbacks your credentials permit. [Provider routing](../reference/cli.md#craze-resolve)
+
 ## Native provider
 
 The native provider (`--provider native`) runs the agent inside craze itself,

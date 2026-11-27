@@ -24,9 +24,10 @@ import (
 // (serveFlags). The session flags both commands take are registered once, by
 // registerSessionFlags (sessionflags.go, plan 030 §3.3).
 type tuiFlags struct {
-	theme     string
-	workspace string
-	model     string
+	readOnlyTools, subscriptionOnly bool
+	theme                           string
+	workspace                       string
+	model                           string
 	// effort is --effort, and fast and noFast --fast and --no-fast (plan 032
 	// §3.11): the session's start settings, read through fastSetting.
 	effort string
@@ -336,8 +337,8 @@ func runTUI(cmd *cobra.Command, f *tuiFlags, env hostEnv) error {
 // the unattended policy has settled whether a person is opening it.
 func sessionOptions(f *tuiFlags, ws, mode string, stderr, diag io.Writer, env []string, p, launch agent.Provider, row sessions.Row) agent.Options {
 	opts := agent.Options{
-		Workspace:       ws,
-		Force:           f.force,
+		Workspace: ws,
+		Force:     f.force, ReadOnlyTools: f.readOnlyTools, SubscriptionOnly: f.subscriptionOnly,
 		Model:           f.model,
 		Effort:          strings.TrimSpace(f.effort),
 		Fast:            f.fastSetting(),

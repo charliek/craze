@@ -1,8 +1,8 @@
 # craze commands for delegation
 
-Needs craze 0.2.0 or newer. The full reference is `docs/reference/cli.md` in the craze repository. These are the commands any agent runs to hand work to another model (Claude Code's agents run them for it). Never start a session on your own provider: see "Don't call yourself" in `SKILL.md`.
+Review and routing need craze 0.6.0 or newer. Delegation starts with craze 0.2.0, subject to each provider’s release floor. The full reference is `docs/reference/cli.md` in the craze repository. These are the commands any agent runs to hand work to another model (Claude Code's agents run them for it). Never start a session on your own provider: see "Don't call yourself" in `SKILL.md`.
 
-This page describes the release after 0.2.0. On craze 0.2.0 itself: a prompt is at most 32 KiB (over it is exit 2), a `--json` failure is `{"error":{"message":…}}` alone, a turn that stopped short has a `stopped:` footer line instead of `error:`, `stop` on a session that has ended is exit 1, and `cancel --turn` does not exist. `craze version` says which you have.
+With craze 0.2.0, a prompt is limited to 32 KiB (exit 2 above that size), a `--json` failure is `{"error":{"message":…}}` alone, a turn that stopped short has a `stopped:` footer line instead of `error:`, `stop` on a session that has ended is exit 1, and `cancel --turn` does not exist. `craze version` says which you have.
 
 ## Start a task: `craze new --wait`
 
@@ -23,7 +23,7 @@ Starts an unattended session in the current directory (no hub), sends it the pro
 | `--remove-prompt-file` | Delete the prompt file once read |
 | `--timeout <d>` | Stop waiting after this long (`9m`): status `running`, exit 5, with a handle |
 | `--max-message <n>` | Print at most `n` characters of the message and plan together; the whole result goes to a file named in the output (`[… cut: full result in <path>]`). Use `20000` |
-| `--no-force` | Permissions are asked, not bypassed: an ask stays open (`needs_input`) |
+| `--no-force` | Craze leaves a provider permission request open (`needs_input`). Antigravity 1.5.18 can run shell commands and edit files without sending a request. |
 | `--json` | One JSON object instead of text; a failure is `{"error":{"message":…,"kind":…,"retryable":…}}`, its kind one of a closed set (failure kinds in `docs/reference/cli.md`) |
 | `-C <dir>` | The directory (default: the current one) |
 
@@ -98,3 +98,17 @@ Run each `craze new --wait` as its own background shell call allowed ten minutes
 ## Permission allow-list (Claude Code, default mode)
 
 `Bash(craze new:*)`, `Bash(craze send:*)`, `Bash(craze wait:*)`, `Bash(craze cancel:*)`, `Edit(//tmp/craze-delegate-*)`. Claude Code applies `Edit` rules to its Write tool, and `//` marks an absolute path (a single leading `/` is relative to the settings file's own directory).
+
+
+## Reviews and model routing
+
+`craze resolve` lists targets and eligible fallbacks offline. Use
+`craze resolve --target sol@6.2 --json` to inspect an explicit version or
+`craze resolve --role panel --json` to select panel seats.
+`craze review --role review --changes-since main --criteria correctness`
+runs the review on an eligible provider. Use `--out` for an atomic, full
+Markdown file and `--bundle-only` to hand the material to a read-only seat.
+
+When replacing codex-run.py, migrate empty exit 4 to 3, stalled exit 5 to
+3 and capped exit 6 to 5. Check `error.kind` for `empty` or `stalled`.
+Craze exits 4 for a review that needs input.

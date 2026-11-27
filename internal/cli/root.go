@@ -93,6 +93,8 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newAttachCmd())
 	cmd.AddCommand(newPsCmd())
 	cmd.AddCommand(newProvidersCmd())
+	cmd.AddCommand(newResolveCmd())
+	cmd.AddCommand(newReviewCmd())
 	cmd.AddCommand(newModelsCmd())
 	cmd.AddCommand(newNewCmd())
 	cmd.AddCommand(newSendCmd())
@@ -121,7 +123,12 @@ func newVersionCmd() *cobra.Command {
 	}
 }
 
+// standaloneCLI is set only by the process entry point. Embedded commands
+// share their process with their caller and cannot adopt or reap its children.
+var standaloneCLI bool
+
 func Execute() {
+	standaloneCLI = true
 	ranCmd, err := NewRootCmd().ExecuteC()
 	if err == nil {
 		joinHostSweep()
@@ -141,6 +148,12 @@ func Execute() {
 // asked for JSON (usageJSON), and the one stderr line either way.
 func report(stdout, stderr io.Writer, ranCmd *cobra.Command, args []string, err error) int {
 	line, code := diagnose(ranCmd, err)
+	if ranCmd != nil && ranCmd.Name() == "review" {
+		// A merged or unread diagnostic pipe may already be full after
+		// the command deadline. Deliver whatever still fits before exit.
+		stderr = &reviewOutput{dst: stderr}
+		stdout = &reviewOutput{dst: stdout}
+	}
 	if b := usageJSON(ranCmd, args, err, line, code); b != nil {
 		// A stdout whose reader has gone must not take the stderr line with it
 		// (craze new's rule): the write fails with EPIPE instead.
@@ -162,6 +175,10 @@ func report(stdout, stderr io.Writer, ranCmd *cobra.Command, args []string, err 
 // is the shell's.
 func usageJSON(ranCmd *cobra.Command, args []string, err error, line string, code int) []byte {
 	if code != 2 || ranCmd == nil || ranCmd.Name() == "prompt" || isCompletionRequest(ranCmd) || !jsonRequested(ranCmd, args) {
+		return nil
+	}
+	var ee *exitError
+	if errors.As(err, &ee) && ee.reported {
 		return nil
 	}
 	b, merr := json.Marshal(failureBody{Error: kindError(line, failureKind(err))})

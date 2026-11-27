@@ -336,7 +336,7 @@ func main() {
 	}
 	if strings.HasPrefix(script, "codex-") {
 		switch script {
-		case "codex-basic", "codex-loggedout", "codex-apikey", "codex-custom-provider",
+		case "codex-basic", "codex-dirty-quota", "codex-quota", "codex-subscription-refused", "codex-paid-endpoint", "codex-loggedout", "codex-apikey", "codex-custom-provider",
 			"codex-approval", "codex-filechange-approval", "codex-ask", "codex-ask-secret",
 			"codex-ask-freetext", "codex-hang", "codex-hang-interrupt", "codex-steer",
 			"codex-resume", "codex-resume-missing", "codex-child-thread", "codex-foreign",
@@ -361,7 +361,7 @@ func main() {
 		return
 	}
 	switch script {
-	case "echo", "followup", "tool", "tasks", "effort", "modelconfig", "modelconfig-refuse",
+	case "review-complete-on-cancel", "review-short", "review-damaged-index", "dirty_tree", "stall", "empty", "echo", "followup", "tool", "tasks", "effort", "modelconfig", "modelconfig-refuse",
 		"modellate", "preinstall", "permission", "ask", "plan",
 		"hang", "hang-ack", "sigint-hold", "authfail", "noauth", "todos", "todos-notify", "diff", "bigdiff",
 		"bash", "task", "task-late", "commands", "nocommands", "callorder", "markdown", "title", "planmode", "planmode-card",

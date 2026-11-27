@@ -116,7 +116,7 @@ func newClaudeState() *claudeState {
 	fastOpt["options"] = []map[string]string{{"value": "on", "name": "On"}, {"value": "off", "name": "Off"}}
 	return &claudeState{sid: fakeSessionID, opts: []map[string]any{
 		claudeSelect("mode", "Mode", "mode", mode, claudeModes...),
-		claudeSelect("model", "Model", "model", "opus", "default", "opus", "sonnet", "haiku"),
+		claudeSelect("model", "Model", "model", "opus", "default", "opus", "sonnet", "haiku", "fable", "claude-opus-5-5", "claude-opus-4-8", "claude-fable-5-2", "claude-fable-5-1"),
 		claudeSelect("effort", "Effort", "thought_level", "high", "default", "low", "medium", "high", "xhigh", "max"),
 		fastOpt,
 		claudeSelect("ultracode", "Ultracode", "model_config", "off", "on", "off"),

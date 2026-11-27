@@ -1269,3 +1269,14 @@ func TestCallerEnded(t *testing.T) {
 		}
 	}
 }
+
+func TestClaudeReviewDeniesWritesAndShellInManualMode(t *testing.T) {
+	r := newClaudeRig(t, "claude-basic", Options{ReadOnlyTools: true, Unattended: true, Force: true})
+	if err := r.s.Start(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	setup := r.read(t, "setup")
+	if !strings.Contains(setup, `"disallowedTools":["ScheduleWakeup","Monitor","CronCreate","Edit","Write","MultiEdit","NotebookEdit","Bash"]`) || r.s.Snapshot().CurrentMode != "default" {
+		t.Fatalf("review setup %s", setup)
+	}
+}

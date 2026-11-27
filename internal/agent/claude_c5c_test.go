@@ -93,8 +93,20 @@ func TestClaudeOverageFallbackOnlyInAPrivateDirectory(t *testing.T) {
 	if fi, _ := os.Stat(dir); fi.Mode().Perm() != 0o700 {
 		t.Fatalf("mode %v; want 0700", fi.Mode().Perm())
 	}
+	if err := os.Chmod(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := inspectFallbackDir(dir, false, false); err != nil {
+		t.Fatal(err)
+	}
+	if fi, _ := os.Stat(dir); fi.Mode().Perm() != 0755 {
+		t.Fatal("offline check changed permissions")
+	}
 	if err := os.Chmod(dir, 0o777); err != nil {
 		t.Fatal(err)
+	}
+	if err := inspectFallbackDir(dir, false, false); err == nil {
+		t.Fatal("trusted a writable fallback directory")
 	}
 	if err := checkFallbackDir(dir, false); err != nil {
 		t.Fatal(err)
@@ -174,7 +186,8 @@ func TestClaudeOverageRecordRefusesAFIFO(t *testing.T) {
 func TestClaudeOverageWakeUnderBackpressure(t *testing.T) {
 	shortForeign(t, 5*time.Second)
 	_, stopped := overageRig(t, 150*time.Millisecond)
-	r := newClaudeRig(t, "claude-overage", Options{Interactive: true}, "CRAZE_FAKE_CLAUDE_IDLE_WAKE=400ms")
+	gate, wake := idleEventGate(t, "CRAZE_FAKE_CLAUDE_IDLE_WAKE_GATE")
+	r := newClaudeRig(t, "claude-overage", Options{Interactive: true}, gate)
 	var stall atomic.Bool
 	release := make(chan struct{})
 	var once sync.Once
@@ -196,6 +209,7 @@ func TestClaudeOverageWakeUnderBackpressure(t *testing.T) {
 		t.Fatal(err)
 	}
 	stall.Store(true)
+	wake()
 	waitStopped(t, r, stopped, 5*time.Second)
 	free()
 }

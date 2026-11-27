@@ -296,8 +296,7 @@ version is `agy` 1.5.14.
 | A `--model` `agy` does not list (`-32602`) | `model_not_found` | `the agent refused model "<model>": <agy's reason>` |
 
 Under the default `--force`, `agy` runs as `agy acp
---dangerously-skip-permissions`; `--no-force` runs `agy acp` and the session's
-`run_command` calls ask. `craze new --wait` on antigravity returns the files
+--dangerously-skip-permissions`; `--no-force` runs `agy acp`. Version 1.5.18 can run commands and edit files without requesting permission. `craze new --wait` on antigravity returns the files
 `edit_file` and `write_file` changed, and under `--plan` the brain plan file as
 `planFile` ([What `files` lists](#what-files-lists)). `agy` runs sub-agents
 asynchronously: in an unattended session they may be cut off when the turn ends.
@@ -2505,6 +2504,9 @@ not promise that re-running a turn repeats no side effects already performed.
 | `context_too_large` | The request does not fit the model's context window (on `claude`, an `invalid_request` saying the prompt is too long; on `codex`, `contextWindowExceeded`) | false |
 | `model_not_found` | The provider or agent does not serve the model: a 404, or on a key provider but Anthropic's a 400 or 403 whose code is `model_not_found`; on `claude`, its `model_not_found` | false |
 | `agent` | An ACP agent's error, or a turn stopped short (`max_tokens`, `refusal`, `max_turn_requests`). Retryable only when the agent's own data says `"retryable":true`, or when the agent's own turn refused the prompt | false unless flagged |
+| `stalled` | A review reached its inactivity deadline | true |
+| `empty` | A completed review returned only whitespace | true |
+| `dirty_tree` | The repository changed during a review attempt | false |
 | `stopped` | The session was stopped, or has ended: on a `cancelled` result with its [cause](#what-began-a-stop), or exit 1 for a target the stop did not find running, or a prompt refused because the session [ends with its turn](#ending-with-the-turn) | false |
 | `connection_lost` | The command lost its socket while the host is shown alive, or its state cannot be told: the turn then may have ended, and the message says which | true |
 | `host_exited` | The host's process is shown gone with no ending observed and no word of a stop | true |
@@ -2512,6 +2514,8 @@ not promise that re-running a turn repeats no side effects already performed.
 | `interrupted` | The command was signalled, before or after the prompt | false |
 | `internal` | Anything else: craze's own failure, a stored session whose transcript cannot be loaded (damaged, or written by a newer craze) included | false |
 | `unknown` | An error from a host older than kinds, which claims nothing and so is not retryable; or a kind from a later craze this one does not know, which keeps the `retryable` that host sent | false unless sent |
+
+Review integrity checks include non-executable permission changes and tracked paths marked assume-unchanged or skip-worktree. The Git inspection uses the requested workspace, disables external content filters and forbids remote transfers for missing objects. If an attempt makes the index unreadable, the result includes the review text and the index diagnostic. Files above the hashing budget are compared using their type, permissions, size, modification time and inode.
 
 ### Usage errors under `--json`
 
@@ -3249,6 +3253,166 @@ its `checksums.txt`, with `crazeVersion` the release's own version: what a
 machine that pins a release can read before installing it — its `capabilities`
 included, so a caller can tell before installing whether that release reports web
 search.
+
+## craze review
+
+Run an unattended code review in a dedicated host. With no selector, Craze
+uses the configured review role. A target uses its ordered fallback routes.
+The final Markdown goes to stdout. Progress and route diagnostics go to stderr.
+
+```sh
+craze review --role review --changes-since main --out /tmp/review.md
+craze review --target sol@6.2 --criteria adversarial --changes-since HEAD
+craze review --provider native --model chatgpt/gpt-6.2-sol "Inspect the cache eviction tests"
+craze review --bundle-only --changes-since main
+```
+
+| Option | Behavior |
+| --- | --- |
+| `--target`, `--version` | Choose a target and optional numeric version. A target can also include `@version`. |
+| `--role` | Choose a single-target role. Use `craze resolve --role panel` to plan multiple seats. |
+| `--provider`, `--model` | Run a provider directly with an optional model, or filter a named target by provider. |
+| `--caller`, `--allow-same-provider` | Override caller detection for routing or explicitly allow an immediate-provider route. |
+| `--allow-paid-fallback` | Admit eligible API-key and metered credentials, including direct provider requests. |
+| `--effort`, `--timeout`, `--stall-timeout` | Override the model effort, total command time or maximum silence after submission. The default cap is the target's cap. The stall default is 10 minutes and 0 disables it. |
+| `-C`, `--dir` | Select the workspace for Git and the provider. |
+| `--prompt-file`, `--remove-prompt-file` | Join repeatable files in order with blank lines. Use `-` once for stdin. Removal deletes regular input files after reading, before integrity checks. Positional words and prompt files are exclusive. |
+| `--criteria` | Select correctness, adversarial, plan or custom review criteria. Changes alone select correctness. Piped stdin can supply an additional request. |
+| `--changes-since` | Freeze a commit and collect the net committed, staged, unstaged and untracked changes. Binary and large untracked content gets a summary. |
+| `--keep-bundle`, `--bundle-only` | Keep a spilled diff after review or prepare a bundle without running a host. Bundle-only requires a ref and preserves the spill for the caller. |
+| `--dirty-check` | Compare worktree contents, permissions, index, refs, HEAD and stash after each host stops. The default `fail` delivers the review with exit 3 on mutation. `warn` reports the changes and stops trying routes. `off` skips comparisons. |
+| `--out`, `--max-message` | Atomically write the full review to a file before stdout. The stdout limit counts characters and defaults to 0 (unlimited). |
+| `--json` | Emit one structured result. |
+
+Inline diffs fit within 900 lines, 100 KiB and the remaining 512 KiB prompt
+budget. Larger diffs use a private `changes.diff` with a line index. The raw
+patch is limited to 5 MiB and carries a marker if truncated. Bundle-only JSON
+includes `inlined`, `bundleFile`, `lines`, `bytes` and `files` with each
+file's `name`, `first` and `last` line. JSON lists every indexed section in
+the emitted patch. The prompt lists the first 300 and counts the rest. To hand inline content to a reviewer,
+use the Markdown output. If shutdown cannot be verified, Craze retains a
+spilled patch and prints its path to stderr. An open input pipe waits for
+EOF when no prompt file or positional words were supplied.
+
+Craze attempts a fallback after a start refusal or a qualifying provider
+failure if the previous host and its children have stopped, the worktree
+check passed and at least 45 seconds remain. The result records `schema`,
+`status`, `message`, the selected `route` and `attempts`. Each attempt
+records its route, `effectiveModel`, `effectiveEffort` when reported, `durationMs`,
+and a sanitized `error`, `kind` or `reason` on failure. `outPath` and
+`bundleFile` identify retained files. `dirtyFiles` also names changed Git
+metadata. `incompleteCheck` indicates bounded checks on large or numerous
+files. Integrity checks require a Git worktree. Submodule bundles show gitlink
+changes. The integrity check also scans submodule worktree files within the
+same bounds and excludes their private Git metadata. It reports changes and
+leaves them on disk.
+
+On Linux the standalone CLI adopts orphaned provider descendants and waits
+for the kernel to confirm the last child exited. On macOS it checks process
+groups, observed descendants and original parent generations. A newly
+orphaned process of uncertain origin can prevent verification. Work started independently by an external service manager has
+no parent link to the review host. An unverified stop returns exit 1 before
+output or fallback.
+
+A signal or cap during shutdown or the final integrity check preserves the
+settled attempt in `attempts` and delivers its text. The command reports
+`cancelled` or `timed_out` with `stopping`. If a reconnect recovers only a
+tail, `messageCut` flags it and `dirtyFiles` still identifies changes.
+An explicit `--max-message` also sets `messageCut` when it shortens JSON
+output. The full completed message is saved with `--out`.
+Partial text from a failed or cancelled turn is available in JSON.
+Only a completed attempt can supply Markdown stdout or replace an existing
+`--out` file. A cap or signal also interrupts a blocked stdout pipe after
+Craze has saved the full review. When stderr is an unread pipe, progress
+and exit diagnostics use the space available, including with `2>&1`.
+A blocked JSON infrastructure error waits within the command budget. An
+unverified final workspace check retains its failure when a deadline or
+signal arrives during inspection.
+`outPath` appears only after Craze saves a complete nonempty message.
+
+Codex review attempts report the billing class from the running host. With
+paid fallback enabled, an unverified endpoint can report `unknown` with
+`provisional: true`. A startup refusal retains the preflight classification.
+
+The built-in review role tries Sol, Astra, Opus, then Neon — ordering stronger
+containment ahead of Antigravity while keeping Neon available as a fallback
+and in panels. A Codex caller skips both OpenAI targets (`sol` and `astra`),
+selects Claude Opus first, and falls back to Neon only if Opus is unavailable
+or fails. On Antigravity 1.5.18, both
+`agy acp` under `--no-force` and `agy acp --sandbox` allowed editing and shell
+writes. A stock launch also wrote outside the worktree. The Git integrity
+check covers the selected worktree. Select `--target opus` or `--target sol`
+to avoid Antigravity fallback altogether.
+
+| Exit | Meaning |
+| --- | --- |
+| 0 | Completed with review text, or prepared a bundle. |
+| 1 | Pre-execution or infrastructure failure, including an empty route ladder. |
+| 2 | Invalid usage, configuration, prompt or Git ref, or self-delegation refusal. |
+| 3 | Failed or cancelled, including a stalled or empty response and a dirty worktree. |
+| 4 | The provider needs input. The host was stopped. |
+| 5 | The command-wide deadline expired. |
+
+## craze resolve
+
+Show which provider and model can serve a target, with the eligible fallbacks
+in order and a reason for each skipped route. Runs entirely offline. Bare
+`craze resolve` shows every configured target. For example:
+
+```shell
+craze resolve --target sol@6.1
+craze resolve --role panel --json
+```
+
+Use `--target` with an optional numeric `@version` suffix or a separate
+`--version`. Moving Claude aliases and unpinned OpenRouter latest aliases
+report a null version. Use `--role` to resolve a named role. The shipped
+review and adversarial-review roles exclude the caller's model family and
+flatten eligible routes across the remaining candidates in order, so runtime
+fallback can step within a target and across candidates without crossing onto
+paid routes. Panel resolves each seat independently, labeling a supported
+same-family seat `native_subagent`. The caller must configure the model,
+effort and permissions of that sub-agent.
+
+`--caller` overrides automatic maker detection. Normally Craze takes the
+union of CRAZE_SESSION_PROVIDER, CLAUDECODE=1, CURSOR_AGENT, ANTIGRAVITY_AGENT,
+and CODEX_THREAD_ID for roles. A known immediate caller skips its own provider
+unless `--allow-same-provider` is set. `--effort` overrides the target default.
+Unsupported effort levels are adjusted to the model's supported levels with
+a warning. `--allow-paid-fallback` admits eligible API-key and metered routes.
+
+`--json` returns a versioned document. Its `schema` is 1. The `caller` has
+`providers` and an optional `immediate` provider. The `kind` selects an
+overview with `targets`, a panel with `seats`, or an individual selection with
+`routes`. Results name the `target`, `effort`, `capSeconds`, `status` and
+panel `mode` as applicable. Routes carry `provider`, `model`, `version`,
+`billing`, `provisional` and an optional `note`. The first eligible route
+wins. Inspect `warnings` for effort changes and `skipped` for each `reason`.
+
+| Reason | Meaning |
+| --- | --- |
+| `paid_blocked` | The credential class requires explicit paid fallback. |
+| `held_env_key` | The native source guard holds this model, including an environment-only key. |
+| `overage_hold` | Claude's machine-wide overage guard refuses a start. |
+| `not_signed_in` | Native has no plan-enabled ChatGPT sign-in. |
+| `binary_missing` | The agent or companion binary cannot run in this environment. |
+| `unfunded` | The native route has no usable funding or its model table cannot load. |
+| `model_unavailable` | The requested model is absent from the local catalog or current account list. |
+| `chatgpt_list_uncached` | A signed-in account's list needs a refresh. This provisional route stays eligible. |
+| `no_version_template` | The route cannot honor a version pin. |
+| `same_maker` | The role excludes an active caller's maker. |
+| `self_delegation` | The route uses the immediate caller's provider. |
+
+Exit 0 means a target is eligible, an overview has at least one eligible
+target, or every panel seat resolved. Exit 1 means a selection lacks an
+eligible route. A partial panel still prints every seat. Exit 2 reports
+invalid flags, malformed routing configuration or a self-delegation refusal.
+
+An explicitly empty routing selector is a usage error. When the immediate
+caller has no eligible non-self route for a target, resolve still prints the
+route diagnostics, including an empty `routes` array in JSON, and exits 2. A fresh native ChatGPT account list must
+include the wire model even when a local alias names it. Antigravity Neon
+and Hydrogen accept effort levels up to `xhigh`. The adapter’s Claude Opus and Sonnet 5.5 routes accept up to `high`.
 
 ## craze version
 

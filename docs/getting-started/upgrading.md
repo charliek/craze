@@ -1568,3 +1568,11 @@ them:
 not. A `~/.cache/craze` that already exists with a looser mode than `0700` is
 refused, and craze never changes it: `chmod 700` it or remove it, or run with
 `CRAZE_DETACH=0`. See [The craze directory](../reference/configuration.md#the-craze-directory).
+
+## Moving from codex-run.py to craze review
+
+Use `craze review --changes-since main --out /tmp/review.md` to write the
+full review. The legacy runner's empty-response exit 4 becomes 3
+(`empty`), its stall exit 5 becomes 3 (`stalled`), and its time-cap exit
+6 becomes 5 (`timed_out`). A review that needs input exits 4. Use the
+JSON error kind to distinguish failures that share an exit code.

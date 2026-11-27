@@ -49,11 +49,16 @@ func overageStops(t *testing.T) <-chan time.Time {
 // done.
 func idleTripGate(t *testing.T) (env string, tripIdle func()) {
 	t.Helper()
-	fifo := filepath.Join(t.TempDir(), "idle-trip")
+	return idleEventGate(t, "CRAZE_FAKE_CLAUDE_IDLE_TRIP")
+}
+
+func idleEventGate(t *testing.T, name string) (string, func()) {
+	t.Helper()
+	fifo := filepath.Join(t.TempDir(), "idle-event")
 	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	return "CRAZE_FAKE_CLAUDE_IDLE_TRIP=" + fifo, func() {
+	return name + "=" + fifo, func() {
 		t.Helper()
 		// The fake holds the FIFO open for reading and writing while it
 		// waits, so this open does not block once it does; until then it
@@ -262,11 +267,13 @@ func TestClaudeOverageStopsAChildThatIgnoresTheCancel(t *testing.T) {
 func TestClaudeOverageWakeWhileTheRecordHolds(t *testing.T) {
 	shortForeign(t, 5*time.Second)
 	record, stopped := overageRig(t, 150*time.Millisecond)
-	r, log := startClaude(t, "claude-overage", Options{Interactive: true}, "CRAZE_FAKE_CLAUDE_IDLE_WAKE=300ms")
+	gate, wake := idleEventGate(t, "CRAZE_FAKE_CLAUDE_IDLE_WAKE_GATE")
+	r, log := startClaude(t, "claude-overage", Options{Interactive: true}, gate)
 	// Another session trips.
 	if _, _, err := writeOverageRecord(resolveOveragePaths(), overageRecord{Until: time.Now().Add(time.Hour), Window: "seven_day", At: time.Now()}); err != nil {
 		t.Fatal(err)
 	}
+	wake()
 	b := log.waitBrackets(t, 2)
 	if !b[0].Running || b[1].Running || b[1].Err == nil || b[1].Err.Kind != errkind.Quota {
 		t.Fatalf("brackets %+v; want the wake ended with quota", b)

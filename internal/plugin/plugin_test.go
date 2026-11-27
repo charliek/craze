@@ -19,10 +19,13 @@ import (
 	"github.com/goccy/go-yaml"
 )
 
-// minCraze is the first craze release with the commands the plugin runs
+// wrapperMinCraze is the first release with the commands the legacy wrappers run
 // (new --wait, send, wait, cancel). Every place that states a minimum
 // spells it this way.
-const minCraze = "0.2.0"
+const wrapperMinCraze = "0.2.0"
+
+// The review and resolve commands first ship in the next minor release.
+const minCraze = "0.6.0"
 
 // wantAgents are the agents plan 041 §3.6 lists. There is no claude preset
 // (plan 052 R2-9): only Claude Code loads these, and it must not target claude.
@@ -145,7 +148,7 @@ func checkAgent(text string) []string {
 			bad = append(bad, "body still contains "+banned)
 		}
 	}
-	for _, want := range []string{"--max-message 20000", "--remove-prompt-file", "craze ≥ " + minCraze} {
+	for _, want := range []string{"--max-message 20000", "--remove-prompt-file", "craze ≥ " + wrapperMinCraze} {
 		if !strings.Contains(body, want) {
 			bad = append(bad, "body does not contain "+want)
 		}
@@ -560,7 +563,7 @@ func TestCodexTarget(t *testing.T) {
 // is reported, so a passing TestAgents is not vacuous.
 func TestCheckersRefuse(t *testing.T) {
 	good := "---\nname: x\ndescription: \"d\"\ntools: Bash, Write\nmodel: haiku\neffort: high\n---\n" +
-		"EVERY message you receive is forwarded to craze Never reply from what you already know ## Follow-ups\n\nEVERY message after the first is forwarded too exactly 12 characters <12 hex digits> timeout: 600000 --max-message 20000 --remove-prompt-file craze ≥ " + minCraze + "\n"
+		"EVERY message you receive is forwarded to craze Never reply from what you already know ## Follow-ups\n\nEVERY message after the first is forwarded too exactly 12 characters <12 hex digits> timeout: 600000 --max-message 20000 --remove-prompt-file craze ≥ " + wrapperMinCraze + "\n"
 	if bad := checkAgent(good); len(bad) != 0 {
 		t.Fatalf("good agent refused: %v", bad)
 	}

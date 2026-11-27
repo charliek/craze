@@ -975,9 +975,8 @@ refused.
 ### What craze sets
 
 - **The command.** Under craze's default `--force`, `agy acp
-  --dangerously-skip-permissions`; under `--no-force`, `agy acp`. With the flag,
-  `agy` stops asking before `run_command`; without it a permission card shows
-  for each shell command (the options are allow once and deny). Questions and
+  --dangerously-skip-permissions`; under `--no-force`, `agy acp`. The installed agent controls permission requests. In 1.5.18, shell commands and
+  file edits can run without a permission card even under `--no-force`. Questions and
   plan mode behave the same either way. craze adds no `--process-per-session`,
   no `--gemini-dir` and no environment but `CRAZE_SESSION_PROVIDER=antigravity`.
 - **Models.** `agy` lists each model several times, once per effort
@@ -3158,3 +3157,63 @@ same turn is waited on again, and craze does not read them back.
 If none of `--agent-bin`, `CRAZE_AGENT_BIN` (each for the launch's own
 provider only) and `[agents]` names one, Cursor looks for
 `cursor-agent`, then `agent`, on `PATH`. Grok looks for `grok` only.
+
+## Cross-provider routing
+
+`craze resolve` reads `routing`, `targets` and `roles` from config.toml.
+Built-in targets are sol, astra, neon, opus and fable. Each target has a
+`maker`, an `effort`, a positive duration `cap`, an optional numeric
+`version`, and ordered `routes`. An omitted field inherits its default.
+Writing an array replaces the entire array. For example, `routes = []`
+disables a target's routes. Each role supplies either ordered `candidates`
+for a single target or ordered `seats` for a panel.
+
+```toml
+[routing]
+allow_paid_fallback = false
+
+[targets.sol]
+cap = "12m"
+
+[[targets.sol.routes]]
+provider = "codex"
+model = "gpt-6.2-sol"
+version_template = "gpt-{v}-sol"
+billing = "subscription"
+
+[roles.review]
+candidates = ["sol", "astra", "opus", "neon"]
+```
+
+Each route names its `provider` and `model`. Its optional `version_template`
+expands `{v}` to the requested dotted version and `{v_dash}` to the same
+version with dashes. Its `billing` class is `subscription`, `api_key` or
+`metered`. Custom entries default to metered. A paid credential source
+requires `allow_paid_fallback` or the command's explicit override, including
+when a route is labeled subscription. The native source hold on an
+environment-only key still applies. Unknown fields inside the routing tables,
+invalid types, and references to unknown targets make routing fail closed.
+
+The billing policy covers how a route authenticates. Extra usage or flexible
+credits enabled on a subscription account follow the provider account's own
+settings. An active Claude overage record holds Claude routes. The offline
+Codex probe checks CODEX_API_KEY and otherwise reports provisional subscription
+eligibility. It reads no Codex configuration or credential files.
+
+### Review provider permissions
+
+Codex receives a read-only command sandbox and never approves escalation.
+Local Codex hooks and MCP servers have their own permissions. A
+subscription-only review checks the account and effective endpoint before
+submitting a turn. Native review sessions offer and execute only read, grep and glob. They check the selected credential driver before a turn and cannot start child agents.
+
+Claude runs in Manual mode with Edit, Write, MultiEdit, NotebookEdit and
+Bash disallowed. Claude hooks and MCP servers have separate permissions.
+A configured Cursor API key or Grok API key makes the route API-key billed. Cursor and Grok run in the agent's Ask mode with automatic permission
+approval disabled. Antigravity receives a read-only request and starts as
+`agy acp`. The 1.5.18 adapter was observed writing inside and outside the
+workspace without requesting permission under this configuration. Git checks
+can report mutations only within the inspected worktree. Because of this
+weaker containment, the default `review` role orders `sol`, `astra` and `opus`
+ahead of `neon` (keeping Antigravity in the mix as a fallback and in `panel`),
+and the default `adversarial-review` role excludes Antigravity.

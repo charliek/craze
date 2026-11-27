@@ -283,6 +283,15 @@ func overlayModel(base Model, o modelOverlay) Model {
 // (withAnthropicList, plan 044 §3.5). Either way, a table with a provider on
 // the chatgpt driver keeps dir as the directory whose sign-in funds it.
 func LoadWith(dir string, cat *Catalog) (*Table, error) {
+	return loadWith(dir, cat, false)
+}
+
+// LoadReadOnly loads the same local model table without repairing permissions.
+func LoadReadOnly(dir string, cat *Catalog) (*Table, error) {
+	return loadWith(dir, cat, true)
+}
+
+func loadWith(dir string, cat *Catalog, readOnly bool) (*Table, error) {
 	if dir == "" {
 		// paths.NativeDir is "" when there is no home directory; joining ""
 		// would read providers.toml from the working directory instead.
@@ -292,8 +301,10 @@ func LoadWith(dir string, cat *Catalog) (*Table, error) {
 	mpath := filepath.Join(dir, ModelsFile)
 
 	var warnings []string
-	if w := tighten(ppath); w != "" {
-		warnings = append(warnings, w)
+	if !readOnly {
+		if w := tighten(ppath); w != "" {
+			warnings = append(warnings, w)
+		}
 	}
 	pb, pHas, err := readIfPresent(ppath)
 	if err != nil {
@@ -356,7 +367,7 @@ func LoadWith(dir string, cat *Catalog) (*Table, error) {
 	// The stored web search keys (plan 051 §F.5), read leniently whatever
 	// kind of table this is: a credentials.toml craze cannot read is a
 	// warning, never a failed load, and every line is value-free.
-	creds, webKeys, webWarnings := loadCredentials(dir)
+	creds, webKeys, webWarnings := loadCredentials(dir, readOnly)
 	t.webKeys, t.credsErr, t.credsProblems = webKeys, creds.err, creds.problems
 	warnings = append(warnings, webWarnings...)
 	t.Warnings = append(warnings, t.Warnings...)

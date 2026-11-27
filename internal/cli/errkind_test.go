@@ -36,6 +36,11 @@ import (
 // a failure is given a kind of its own. The rest are commands with no JSON failure
 // to print.
 var internalFailureSites = []string{
+	`review_cmd.go: kindf "craze review: %s"`,
+	`review_cmd.go: kindf "craze review: checking workspace: %s"`,
+	`review_cmd.go: kindf "craze review: creating output directory: %s"`,
+	`review_cmd.go: kindf "craze review: writing output: %s"`,
+	`review_output.go: kindf "craze review: writing stdout: %s"`,
 	`attach.go: exitf "%s"`,
 	`attach.go: exitf "craze attach: %s"`,
 	`attach.go: exitf "craze attach: %s"`,

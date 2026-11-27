@@ -46,6 +46,12 @@ const (
 	ModelNotFound Kind = "model_not_found"
 	// Agent is an ACP agent's own error, or a turn stopped short of its end.
 	Agent Kind = "agent"
+	// Stalled is a review turn that stopped making progress.
+	Stalled Kind = "stalled"
+	// Empty is a completed review with no substantive message.
+	Empty Kind = "empty"
+	// DirtyTree is a mutation detected during a review attempt.
+	DirtyTree Kind = "dirty_tree"
 	// Stopped is the session having been stopped.
 	Stopped Kind = "stopped"
 	// ConnectionLost is the waiter losing its socket to a live host.
@@ -80,13 +86,14 @@ var kinds = map[Kind]bool{
 	ContextTooLarge:     false,
 	ModelNotFound:       false,
 	Agent:               false,
-	Stopped:             false,
-	ConnectionLost:      true,
-	HostExited:          true,
-	Unobserved:          true,
-	Interrupted:         false,
-	Internal:            false,
-	Unknown:             false,
+	Stalled:             true, Empty: true, DirtyTree: false,
+	Stopped:        false,
+	ConnectionLost: true,
+	HostExited:     true,
+	Unobserved:     true,
+	Interrupted:    false,
+	Internal:       false,
+	Unknown:        false,
 }
 
 // Retryable is k's default: what a failure of it says when nothing more is

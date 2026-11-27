@@ -1,11 +1,20 @@
 ---
 name: craze
-description: "How to hand work to another model through craze from your agent (Claude Code, Cursor, Grok or a craze session). Use it when the user asks to delegate, offload or get a second opinion from a native (craze's own agent), Grok, Cursor, Antigravity (Gemini), Codex or Claude model, to run several models on a task in parallel, to continue or watch a craze session, or to review with another model. Never use craze to reach your own provider (Claude Code is claude, Cursor is cursor, Grok is grok, Antigravity's agy is antigravity, Codex is codex, a craze native session is native): use your own sub-agent tool. Covers Claude Code's craze:delegate agent and its presets (sol, astra, muse, wonder, grok, cursor, neon), the craze new --wait, send, wait, cancel and stop commands any agent can run, the claude, antigravity and codex targets (antigravity needs a craze newer than 0.4.1; codex needs a craze newer than 0.5.0), web search, statuses, exit codes, handles, follow-ups, craze attach, and the permission allow-list. Needs craze 0.2.0 or newer."
+description: "How to hand work to another model through craze from your agent (Claude Code, Cursor, Grok or a craze session). Use it when the user asks to delegate, offload or get a second opinion from a native (craze's own agent), Grok, Cursor, Antigravity (Gemini), Codex or Claude model, to run several models on a task in parallel, to continue or watch a craze session, or to review with another model. Never use craze to reach your own provider (Claude Code is claude, Cursor is cursor, Grok is grok, Antigravity's agy is antigravity, Codex is codex, a craze native session is native): use your own sub-agent tool. Covers Claude Code's craze:delegate agent and its presets (sol, astra, muse, wonder, grok, cursor, neon), the craze new --wait, send, wait, cancel and stop commands any agent can run, the claude, antigravity and codex targets (antigravity needs a craze newer than 0.4.1; codex needs a craze newer than 0.5.0), web search, statuses, exit codes, handles, follow-ups, craze attach, and the permission allow-list. Review and routing need craze 0.6.0 or newer."
 ---
 
 # Delegating to other models with craze
 
-craze drives coding agents in sessions of their own: its own **native** agent (on a model provider's API or a ChatGPT plan), **Grok**, **Cursor**, **Antigravity** (Google's `agy`, on the user's Antigravity plan: Gemini 4 Neon, Argon and Hydrogen among its models), **Codex** (OpenAI's `codex` CLI via `codex app-server`, on the user's ChatGPT or OpenAI account) and **Claude** (the user's own Claude Code, on their Claude plan). This skill is how your agent — Claude Code, Cursor, Grok, Antigravity, Codex or a craze session — hands a task to one of those sessions and gets the result back, as it would from a sub-agent of its own. From Claude Code the plugin's agents do it; any agent can run the commands itself ([Driving craze directly](#driving-craze-directly)). Needs craze 0.2.0 or newer on `PATH`.
+craze drives coding agents in sessions of their own: its own **native** agent (on a model provider's API or a ChatGPT plan), **Grok**, **Cursor**, **Antigravity** (Google's `agy`, on the user's Antigravity plan: Gemini 4 Neon, Argon and Hydrogen among its models), **Codex** (OpenAI's `codex` CLI via `codex app-server`, on the user's ChatGPT or OpenAI account) and **Claude** (the user's own Claude Code, on their Claude plan). This skill is how your agent — Claude Code, Cursor, Grok, Antigravity, Codex or a craze session — hands a task to one of those sessions and gets the result back, as it would from a sub-agent of its own. From Claude Code the plugin's agents do it; any agent can run the commands itself ([Driving craze directly](#driving-craze-directly)). Review and routing need craze 0.6.0 or newer on `PATH`. The earlier delegation commands are available from 0.2.0, subject to each provider’s release floor.
+
+## Review changes
+
+Use `craze resolve --role review --json` to see which model can review
+the current caller's work. Run `craze review --role review --changes-since
+main --out /tmp/review.md` to get the full Markdown review and verify the
+worktree after each attempt. Use `craze resolve --role panel --json` to
+choose seats independently. For a native sub-agent seat, configure its
+model, effort and read-only permissions on the caller. Antigravity 1.5.18 can edit files and execute shell commands under `--no-force`. Its post-review Git check covers the inspected worktree.
 
 ## Don't call yourself
 
@@ -78,6 +87,8 @@ The agents run `craze` and write the task file. To avoid a prompt on each call, 
       "Bash(craze new:*)",
       "Bash(craze send:*)",
       "Bash(craze wait:*)",
+      "Bash(craze resolve:*)",
+      "Bash(craze review:*)",
       "Bash(craze cancel:*)",
       "Edit(//tmp/craze-delegate-*)"
     ]

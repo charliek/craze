@@ -198,6 +198,11 @@ func dialWait(ctx context.Context, e rundir.Entry, sessionID, what string, curso
 
 // waitOptions shape one wait.
 type waitOptions struct {
+	// progress observes a delivered stream event once, before buffering, so
+	// silent submits and tool calls have independent inactivity deadlines.
+	progress       func(incarnation string, seq uint64)
+	progressPrompt string
+	fullMessage    bool
 	// timeout fires at --timeout's end, counted from the command's start
 	// (timeoutAt); nil waits as long as the turn runs. A channel, so a test
 	// fires it when it means to.
@@ -213,6 +218,8 @@ type waitOptions struct {
 // waitStart is where one wait starts. At most one of from and submit is set;
 // with neither, the wait is plain: the session's current turn, or its last.
 type waitStart struct {
+	// submitContext bounds proof of identity and transmission independently of settlement.
+	submitContext context.Context
 	// from is wait --from's handle: the connection is attached at its cursor,
 	// and the wait follows exactly its target.
 	from *turnHandle
@@ -282,9 +289,10 @@ type submitAnswer struct {
 
 // turnWaiter is one wait.
 type turnWaiter struct {
-	conn  *waitConn
-	opts  waitOptions
-	start waitStart
+	progress reviewProgress
+	conn     *waitConn
+	opts     waitOptions
+	start    waitStart
 
 	// session is who the result is about; its model is read from
 	// session.state and the stream's model deltas.
@@ -405,13 +413,15 @@ type idleScan struct {
 
 // newTurnWaiter is a wait over conn.
 func newTurnWaiter(conn *waitConn, start waitStart, opts waitOptions) *turnWaiter {
-	return &turnWaiter{
+	w := &turnWaiter{
 		conn:    conn,
 		opts:    opts,
 		start:   start,
 		session: resultSession{id: conn.sessionID, provider: conn.entry.Provider},
 		acc:     newTurnAccumulator(),
 	}
+	w.acc.full = opts.fullMessage
+	return w
 }
 
 // waitTurn is the waiter's entry point (the one C3's new --wait and send
@@ -473,7 +483,14 @@ func (w *turnWaiter) run(ctx context.Context) (*turnResult, *waitFailure) {
 	}()
 	items := make(chan pumped)
 	go pumpStream(pctx, w.conn.st, items)
+	w.progress.prompt = w.opts.progressPrompt
 	take := func(p pumped) {
+		if w.opts.progress != nil && p.err == nil && p.it.Kind == remote.KindEvent {
+			ev, err := agent.DecodeEvent(string(p.it.Body))
+			if err == nil && w.progress.accepts(w.target, ev) {
+				w.opts.progress(w.inc, p.it.Seq)
+			}
+		}
 		if w.buffering() {
 			// Kept, the stream's end and loss included, until the reply
 			// names the target: an ending already on the stream is then
@@ -507,6 +524,22 @@ func (w *turnWaiter) run(ctx context.Context) (*turnResult, *waitFailure) {
 		select {
 		case p := <-items:
 			take(p)
+			if !w.opts.fullMessage || w.done() || w.unsettled != nil {
+				continue
+			}
+			// One already delivered item may carry the settlement. A hot stream
+			// must then yield to a waiting cap, signal, or submit acknowledgment.
+			select {
+			case in := <-w.intr:
+				if in.timeout {
+					w.timedOut(items)
+				} else {
+					w.signalled(items)
+				}
+			case a := <-w.submitted:
+				w.submitAnswered(op, a)
+			default:
+			}
 			continue
 		default:
 		}
@@ -915,6 +948,9 @@ func (w *turnWaiter) attached(ctx context.Context, r *protocol.AttachResult) {
 			}
 		}
 		ch, submit, base := make(chan submitAnswer, 1), w.start.submit, w.base
+		if w.start.submitContext != nil {
+			base = w.start.submitContext
+		}
 		c, sid, inc := w.conn.c, w.session.id, w.inc
 		w.submitted = ch
 		go func() {
@@ -954,6 +990,7 @@ func (w *turnWaiter) requeue(row string, seq uint64) {
 	w.rowSent, w.folding, w.startSeen, w.anchor = false, false, false, seq
 	w.removeSent, w.cancelSent = false, false
 	w.acc = newTurnAccumulator()
+	w.acc.full = w.opts.fullMessage
 }
 
 // adoptInfo takes the session's facts from an info document.
@@ -1423,12 +1460,25 @@ func (w *turnWaiter) followFrom(snap *transcript.Snapshot, seq uint64, same bool
 	// What runs at the snapshot's seq, the stream's place from here on: a
 	// wake's sections are its own (ownWeb), as its tally there is (seedWeb).
 	w.foreign = runningForeign(snap)
+	if w.opts.progress != nil && w.target.kind == targetTurn && snap.Turn.ID == w.target.id {
+		w.progress.turn, w.progress.foreign = w.target.id, w.foreign
+	}
 	w.acc = newTurnAccumulator()
+	w.acc.full = w.opts.fullMessage
 	if w.target.kind == targetTurn && !snap.Turn.At.IsZero() {
 		w.acc.start(snap.Turn.At)
 	}
 	seedFromSnapshot(w.acc, snap, w.target.id)
+	if w.acc.full && w.acc.msgSeq == 0 && len(snap.Main.Omitted) > 0 {
+		// The snapshot window may have omitted the final assistant entry.
+		// Only a later, complete assistant run can establish the full answer.
+		w.acc.msgCut = true
+	}
 	if same {
+		if w.acc.full && w.acc.msgCut && snap.Seq == prev.seq && w.acc.msgSeq == prev.msgSeq && !prev.msgCut {
+			// The snapshot is at the exact stream position already observed.
+			w.acc.msg, w.acc.msgCut = prev.msg, false
+		}
 		// The web tally the waiter folded is kept when it is newer than the
 		// snapshot's (the seq rule): it never is after a reconcile's
 		// snapshot, which the rule makes a property, not an assumption.

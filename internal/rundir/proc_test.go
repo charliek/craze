@@ -109,10 +109,10 @@ func TestParseProcMember(t *testing.T) {
 		name, line string
 		want       GroupMember
 	}{
-		{"plain", "77 (sleep)" + tail, GroupMember{PID: 77, PGID: 900, Session: 901, Start: 987654}},
-		{"a command like a) b (c", "77 (a) b (c)" + tail, GroupMember{PID: 77, PGID: 900, Session: 901, Start: 987654}},
-		{"a command that ends like a line", "77 (x) S 1 2 3 ) 4)" + tail, GroupMember{PID: 77, PGID: 900, Session: 901, Start: 987654}},
-		{"a zombie", "77 (x) Z" + tail[2:], GroupMember{PID: 77, PGID: 900, Session: 901, Start: 987654, Zombie: true}},
+		{"plain", "77 (sleep)" + tail, GroupMember{PID: 77, PPID: 4242, PGID: 900, Session: 901, Start: 987654}},
+		{"a command like a) b (c", "77 (a) b (c)" + tail, GroupMember{PID: 77, PPID: 4242, PGID: 900, Session: 901, Start: 987654}},
+		{"a command that ends like a line", "77 (x) S 1 2 3 ) 4)" + tail, GroupMember{PID: 77, PPID: 4242, PGID: 900, Session: 901, Start: 987654}},
+		{"a zombie", "77 (x) Z" + tail[2:], GroupMember{PID: 77, PPID: 4242, PGID: 900, Session: 901, Start: 987654, Zombie: true}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := parseProcMember(77, tc.line)
@@ -247,7 +247,7 @@ func TestProcessGroupsFindsAGroupsMembers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := groups[pid], []GroupMember{{PID: pid, PGID: pid, Session: pid, Start: id.Start}}; !slices.Equal(got, want) {
+	if got, want := groups[pid], []GroupMember{{PID: pid, PPID: id.PPID, PGID: pid, Session: pid, Start: id.Start}}; !slices.Equal(got, want) {
 		t.Fatalf("the group: %+v, want %+v", got, want)
 	}
 	if m, err := ProcessMember(pid); err != nil || m != groups[pid][0] {

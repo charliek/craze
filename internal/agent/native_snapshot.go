@@ -213,6 +213,11 @@ func (s *nativeSession) sessionStart(workspace string, now func() time.Time, tab
 	if now == nil {
 		now = time.Now
 	}
+	// Review has its own Git inspection and bundle. Native's ordinary
+	// session-start status could invoke repository filters a second time.
+	if s.opts.ReadOnlyTools {
+		return harness.SessionStart{Date: now().Format(sessionStartDate)}
+	}
 	run := s.gitRun
 	if run == nil {
 		run = execGit(gitEnviron(table))

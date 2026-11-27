@@ -177,7 +177,8 @@ type Spec struct {
 	PluginDirs []string
 	// NoForce is --no-force: the session handles permission requests
 	// rather than allowing everything.
-	NoForce bool
+	NoForce                         bool
+	ReadOnlyTools, SubscriptionOnly bool
 	// Ask, Plan and Continue are --ask, --plan and --continue.
 	Ask, Plan, Continue bool
 	// Load is --load: the session to load, "" for none.
@@ -252,6 +253,12 @@ func Args(s Spec) []string {
 	str("agent-bin", s.AgentBin)
 	for _, d := range s.PluginDirs {
 		argv = append(argv, "--plugin-dir="+d)
+	}
+	if s.ReadOnlyTools {
+		argv = append(argv, "--read-only-tools")
+	}
+	if s.SubscriptionOnly {
+		argv = append(argv, "--subscription-only")
 	}
 	if s.NoForce {
 		argv = append(argv, "--no-force")

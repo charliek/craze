@@ -1392,6 +1392,13 @@ func (s *nativeSession) open() (*harness.Session, nativeOpened, nativeLoad, erro
 		}
 	}
 
+	hopts.ReadOnlyTools = s.opts.ReadOnlyTools
+	if s.opts.SubscriptionOnly {
+		model, ok := table.Models[hopts.Model]
+		if !ok || table.Providers[model.Provider].Driver != modeltable.DriverChatGPT {
+			return nil, nativeOpened{}, none, &nativeConfigError{msg: "paid_blocked: native review requires a ChatGPT subscription model"}
+		}
+	}
 	// One resolution of the keys, for all three of the things that need them:
 	// the gate that drops an entry whose identity holds one (dropKeyBearing),
 	// the redactor every content diagnostic goes through (contentWarn), and —

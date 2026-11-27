@@ -1314,6 +1314,11 @@ type Options struct {
 	// cli's unattendedPolicy): claude's is started without the tools that
 	// schedule work for after its host has exited (plan 052 § E3).
 	Unattended bool
+	// Review host policies, fixed before the first turn.
+	ReadOnlyTools    bool
+	SubscriptionOnly bool
+	// ReviewBilling publishes the charge class from the active Codex host before any review turn.
+	ReviewBilling func(string) error
 	// Title and TitlePinned seed the session's title and its /rename pin
 	// before the replay. No agent replays a title (plan 013 §2.1), so the
 	// index row craze loaded the id from is the only place a resumed

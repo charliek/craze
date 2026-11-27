@@ -62,6 +62,8 @@ var spawnDial = remote.DialSession
 
 // spawnOptions is what a host is spawned for.
 type spawnOptions struct {
+	// onChild records ownership even if the following ready handshake fails.
+	onChild func(*hostspawn.Child, string)
 	// env is the registry the rendezvous reads and the cache tree the host's
 	// log is in: rundir.ProcessEnv() — the host's own, which it inherits.
 	env rundir.Env
@@ -235,6 +237,9 @@ func spawnOnce(ctx context.Context, opts spawnOptions) (hostRef, *hostspawn.Read
 		}
 		return hostRef{}, nil, &spawnError{kind: spawnStartFailed, msg: "craze: the session host cannot be started: " + err.Error(), err: err}
 	}
+	if opts.onChild != nil {
+		opts.onChild(child, hostID)
+	}
 	line, failure, why := hostspawn.ReadReady(ctx, r)
 	_ = r.Close()
 	if failure != 0 {
@@ -316,17 +321,18 @@ var startReparented = hostspawn.StartReparented
 // --no-host-status.
 func serveSpec(f *tuiFlags, load, hostID, logPath string) hostspawn.Spec {
 	return hostspawn.Spec{
-		HostID:       hostID,
-		Log:          logPath,
-		Workspace:    f.workspace,
-		Provider:     f.provider,
-		Model:        f.model,
-		Effort:       strings.TrimSpace(f.effort),
-		Fast:         f.fastSetting(),
-		WebSearch:    f.webSearchSetting().String(),
-		AgentBin:     f.agentBin,
-		PluginDirs:   f.pluginDirs,
-		NoForce:      !f.force || f.noForce,
+		HostID:        hostID,
+		Log:           logPath,
+		Workspace:     f.workspace,
+		Provider:      f.provider,
+		Model:         f.model,
+		Effort:        strings.TrimSpace(f.effort),
+		Fast:          f.fastSetting(),
+		WebSearch:     f.webSearchSetting().String(),
+		AgentBin:      f.agentBin,
+		PluginDirs:    f.pluginDirs,
+		NoForce:       !f.force || f.noForce,
+		ReadOnlyTools: f.readOnlyTools, SubscriptionOnly: f.subscriptionOnly,
 		Ask:          f.ask,
 		Plan:         f.plan,
 		Continue:     f.cont,

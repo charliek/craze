@@ -592,6 +592,29 @@ func openRecord(path string, note noteFunc) (rec *groupRecord, busy bool) {
 	return rec, false
 }
 
+// ObservedGroups captures the host's complete record without following links
+// or waiting for a writer. A torn or oversized record cannot verify teardown.
+func ObservedGroups(path string) ([]int, error) {
+	f, st, data, err := readRecordFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	var invalid bool
+	records := parseRecord(data, path, func(string, ...any) { invalid = true })
+	if invalid || st.Size() > recordBytes || len(data) > 0 && data[len(data)-1] != '\n' {
+		return nil, errors.New("incomplete review process group record")
+	}
+	ids := make([]int, 0, len(records))
+	for _, r := range records {
+		ids = append(ids, r.PGID)
+	}
+	return ids, nil
+}
+
 // readRecordFile opens path, never through a link, and reads it: an error for
 // anything but a regular file of this user's. One past the size a host could write
 // is read only as far as that: its size says the rest.

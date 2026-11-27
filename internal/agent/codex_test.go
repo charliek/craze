@@ -1009,3 +1009,23 @@ func TestCodexUnifiedDiffDeleteMultiHunkAndNewlineOnly(t *testing.T) {
 		t.Fatalf("newline-only diff lost edit: old=%q new=%q", nlOnly.OldText, nlOnly.NewText)
 	}
 }
+
+func TestCodexSubscriptionGuard(t *testing.T) {
+	for _, tc := range []struct {
+		script string
+		kind   errkind.Kind
+	}{{"codex-apikey", errkind.Auth}, {"codex-loggedout", errkind.Auth}, {"codex-custom-provider", errkind.Auth}, {"codex-paid-endpoint", errkind.Auth}} {
+		t.Run(tc.script, func(t *testing.T) {
+			prov := CodexProvider()
+			s := New(Options{Provider: &prov, Binary: fakeAgentPath(t), Workspace: t.TempDir(), Env: append(os.Environ(), "CRAZE_FAKE_SCRIPT="+tc.script), NoPrimary: true, SubscriptionOnly: true})
+			defer s.Close()
+			if err := s.Start(t.Context()); err == nil || ErrorInfo(err).Kind != tc.kind {
+				t.Fatalf("start = %v, want %s", err, tc.kind)
+			}
+		})
+	}
+	s, _ := startCodexFake(t, "codex-basic", Options{Force: true, SubscriptionOnly: true})
+	if s.Snapshot().SessionID == "" {
+		t.Fatal("no subscription thread")
+	}
+}

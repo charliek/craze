@@ -810,3 +810,11 @@ func TestNativeLoadCollectsItsOwnSnapshot(t *testing.T) {
 		t.Fatalf("the load ran git %d times; want one snapshot's %d", len(g.calls()), gitParts)
 	}
 }
+
+func TestReviewSessionStartsWithoutAnotherGitInspection(t *testing.T) {
+	s := &nativeSession{opts: Options{ReadOnlyTools: true}}
+	snap := s.sessionStart(t.TempDir(), time.Now, nil, nil)
+	if snap.Date == "" || snap.Status != "" || snap.Log != "" {
+		t.Fatal(snap)
+	}
+}

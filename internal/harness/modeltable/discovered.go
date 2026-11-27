@@ -185,6 +185,9 @@ func readSmallFile(path string, max int64) ([]byte, error) {
 	return b, nil
 }
 
+// ChatGPTPlanAvailable reports whether the native table has a plan-enabled sign-in.
+func (t *Table) ChatGPTPlanAvailable() bool { return signInVia(t.signIn) == KeySignedIn }
+
 // signInVia is how dir's ChatGPT sign-in funds the plan now (P34): signed in
 // — the token file a non-empty regular file, and the registration granting
 // plan usage; plan usage disabled — a registration that says the account

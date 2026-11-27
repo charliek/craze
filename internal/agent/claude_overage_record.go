@@ -88,6 +88,10 @@ func defaultOverageFallback(primary string) string {
 // directory, not a symlink, owned by this user; a mode that lets anyone else
 // in is closed to 0700. Anything else is refused.
 func checkFallbackDir(dir string, create bool) error {
+	return inspectFallbackDir(dir, create, true)
+}
+
+func inspectFallbackDir(dir string, create, repair bool) error {
 	fi, err := os.Lstat(dir)
 	if errors.Is(err, fs.ErrNotExist) && create {
 		if err := os.Mkdir(dir, 0o700); err != nil && !errors.Is(err, fs.ErrExist) {
@@ -106,6 +110,14 @@ func checkFallbackDir(dir string, create bool) error {
 		return fmt.Errorf("%s is not this user's", dir)
 	}
 	if fi.Mode().Perm()&0o077 != 0 {
+		if !repair {
+			// A directory owned by this user with no other writer can be
+			// inspected without changing its mode during offline resolution.
+			if fi.Mode().Perm()&0022 == 0 {
+				return nil
+			}
+			return errRecordUnusable
+		}
 		if err := os.Chmod(dir, 0o700); err != nil {
 			return err
 		}
@@ -283,9 +295,9 @@ func readBounded(read func() (*overageRecord, error)) (*overageRecord, error) {
 // same bounded read (review C5c item 3). A directory that does not exist is
 // no fallback (errNoFallback); any other failure of the check — not this
 // user's, a symlink, an I/O error — is the check's error, and refuses.
-func readFallback(path string) (*overageRecord, error) {
+func readFallback(path string, repair bool) (*overageRecord, error) {
 	overageIO("checkdir", path)
-	if err := checkFallbackDir(filepath.Dir(path), false); err != nil {
+	if err := inspectFallbackDir(filepath.Dir(path), false, repair); err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, errNoFallback
 		}
@@ -302,7 +314,13 @@ func readFallback(path string) (*overageRecord, error) {
 // refuses too, and says which file: the guard fails closed (review C5b item
 // 1). So does a fallback whose directory cannot be checked, or fails the
 // check, for any reason but not existing (review C5c item 3).
-func overageRefusalAt(at overagePaths) error {
+func overageRefusalAt(at overagePaths) error { return checkOverage(at, true) }
+
+// ClaudeOverageHeld checks both trip records without changing permissions
+// or creating state. An unreadable record keeps the route closed.
+func ClaudeOverageHeld() bool { return checkOverage(resolveOveragePaths(), false) != nil }
+
+func checkOverage(at overagePaths, repair bool) error {
 	now := overageClock()
 	var held *overageRecord
 	heldAt := ""
@@ -312,7 +330,7 @@ func overageRefusalAt(at overagePaths) error {
 		}
 		read := func() (*overageRecord, error) { return readOverageRecord(p) }
 		if i == 1 {
-			read = func() (*overageRecord, error) { return readFallback(p) }
+			read = func() (*overageRecord, error) { return readFallback(p, repair) }
 		}
 		rec, err := readBounded(read)
 		if errors.Is(err, errNoFallback) {

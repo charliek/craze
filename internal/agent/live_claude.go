@@ -89,9 +89,16 @@ func (s *session) sessionParams(loading bool) acp.SessionParams {
 		sp.ConfigOptions = append(sp.ConfigOptions, acp.ConfigOptionValue{ConfigID: claudeEffortID, Value: strings.TrimSpace(s.opts.LoadEffort)})
 	}
 	sp.ConfigOptions = append(sp.ConfigOptions, acp.ConfigOptionValue{ConfigID: "fast", Value: "off"})
+	var disallowed []string
 	if s.opts.Unattended {
+		disallowed = append(disallowed, unattendedDisallowedTools...)
+	}
+	if s.opts.ReadOnlyTools {
+		disallowed = append(disallowed, "Edit", "Write", "MultiEdit", "NotebookEdit", "Bash")
+	}
+	if len(disallowed) > 0 {
 		sp.Meta = map[string]any{"claudeCode": map[string]any{"options": map[string]any{
-			"disallowedTools": append([]string(nil), unattendedDisallowedTools...),
+			"disallowedTools": disallowed,
 		}}}
 	}
 	return sp

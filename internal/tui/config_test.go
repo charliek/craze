@@ -4,11 +4,13 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/charliek/craze/internal/agent"
+	"github.com/charliek/craze/internal/routing"
 )
 
 // writeConfigFile points CRAZE_HOME at a fresh directory and writes body as
@@ -571,5 +573,34 @@ func TestConfigProviderRetriesTable(t *testing.T) {
 				t.Fatalf("ConfigProviderRetries() = %d, %q; want %d, %q", got, why, tc.want, tc.why)
 			}
 		})
+	}
+}
+
+func TestSavePreferencesPreservesRouting(t *testing.T) {
+	path := writeConfigFile(t, `[routing]
+allow_paid_fallback = true
+[[targets.sol.routes]]
+provider = "native"
+model = "chatgpt/test"
+billing = "subscription"
+[[targets.sol.routes]]
+provider = "codex"
+model = "test"
+version_template = "test-{v}"
+[roles.review]
+candidates = ["sol"]
+`)
+	before, err := routing.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, save := range []func() error{func() error { return SaveTheme("gruvbox") }, func() error { return SaveProvider("codex") }} {
+		if err := save(); err != nil {
+			t.Fatal(err)
+		}
+		after, err := routing.Load(path)
+		if err != nil || !reflect.DeepEqual(before, after) {
+			t.Fatalf("routing changed: %+v, %v", after, err)
+		}
 	}
 }

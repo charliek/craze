@@ -69,7 +69,8 @@ import (
 //	                 the test sends it when its Start is done, so the trip
 //	                 never lands in the start however slow that is.
 //	                 CRAZE_FAKE_CLAUDE_IDLE_WAKE (a duration): that long after
-//	                 session/new, a wake that does not trip.
+//	                 session/new, a wake that does not trip. With
+//	                 CRAZE_FAKE_CLAUDE_IDLE_WAKE_GATE, wait for its FIFO first.
 //	                 CRAZE_FAKE_CLAUDE_IDLE_LIMIT (a duration): that long after
 //	                 session/new, a changed plan limit that does not trip.
 //	                 CRAZE_FAKE_CLAUDE_SETUP_TRIP (set): the trip before
@@ -302,8 +303,12 @@ func (s *server) claudeOverageSetup(sid string) {
 			s.usageReport(sid, 30000, claudeModel, planRateLimit(), false)
 		}()
 	}
-	if d := envDuration("CRAZE_FAKE_CLAUDE_IDLE_WAKE", 0); d > 0 {
+	gate := os.Getenv("CRAZE_FAKE_CLAUDE_IDLE_WAKE_GATE")
+	if d := envDuration("CRAZE_FAKE_CLAUDE_IDLE_WAKE", 0); d > 0 || gate != "" {
 		go func() {
+			if gate != "" {
+				awaitSetGate(gate)
+			}
 			time.Sleep(d)
 			s.usageReport(sid, 30000, claudeModel, nil, false)
 			s.claudeSay(sid, "an idle wake")

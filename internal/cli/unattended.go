@@ -142,7 +142,7 @@ type submitGate struct {
 // run is the waiter's submit (waitStart.submit), through the gate.
 func (g *submitGate) run(ctx context.Context, ident uint64) (waitTarget, error) {
 	g.mu.Lock()
-	if g.closed {
+	if g.closed || ctx.Err() != nil {
 		g.mu.Unlock()
 		return waitTarget{}, errPromptWithheld
 	}
