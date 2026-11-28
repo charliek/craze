@@ -1308,7 +1308,7 @@ starts](#model-memory-recentjson)):
 
 | Rank | Provider | Start model |
 |------|----------|-------------|
-| 1 | `zai-coding-plan` | `glm-5.3` |
+| 1 | `zai-coding-plan` | `glm-5.4` |
 | 2 | `chatgpt` | the first of `chatgpt/gpt-6.2-sol`, `chatgpt/gpt-6.1-sol`, `chatgpt/gpt-5.6-sol` the account lists |
 | 3 | `fireworks` | `fireworks/deepseek-v4p1-flash-1017` |
 | 4 | `openrouter` | `openrouter/gemini-4-hydrogen` |
@@ -1317,7 +1317,7 @@ starts](#model-memory-recentjson)):
 | 7 | `openai` | `openai/gpt-6.2-sol`, at `medium` |
 
 So a machine with only a Fireworks key starts on `fireworks/deepseek-v4p1-flash-1017`, one with
-only a Z.AI key on `glm-5.3`, one with only an Anthropic key on
+only a Z.AI key on `glm-5.4`, one with only an Anthropic key on
 `anthropic/claude-opus-5-5`, one with only an OpenAI key stored (`craze auth
 login openai`) on `openai/gpt-6.2-sol`, and one signed in to the ChatGPT plan
 with a Fireworks key as well on the plan's model. OpenAI's key is last: a
@@ -2297,7 +2297,7 @@ on the first of:
 3. for each provider in the provider order — your `provider_order`, else the
    [catalog's](#the-shipped-catalog): Z.AI Coding Plan, ChatGPT plan,
    Fireworks, OpenRouter, Meta, Anthropic, OpenAI — that has a key, the
-   provider's start model (`glm-5.3`; the first of `chatgpt/gpt-6.2-sol`,
+   provider's start model (`glm-5.4`; the first of `chatgpt/gpt-6.2-sol`,
    `chatgpt/gpt-6.1-sol` and `chatgpt/gpt-5.6-sol` that the account lists;
    `fireworks/deepseek-v4p1-flash-1017`; `openrouter/gemini-4-hydrogen`;
    `muse-spark-1.3-contributor`; the newest Opus the Anthropic account lists;
@@ -2406,7 +2406,7 @@ The catalog's order is `zai-coding-plan`, `chatgpt`, `meta`, `openai`,
 |---|---|---|
 | OpenAI (`openai`) | `chatgpt`, `openai`, `openrouter` | `chatgpt/*` (the account's list), `openai/*`, `openrouter/gpt-{sol,astra,luna,terra}-latest` |
 | Meta (`meta`) | `meta`, `openrouter` | `muse-*`, `openrouter/muse-spark-1.3`, `openrouter/muse-wonder` |
-| GLM (`zai`) | `zai-coding-plan`, `fireworks`, `openrouter` | `glm-5.3`, `glm-5.3-flash`, `fireworks/glm-5p3`, `fireworks/glm-5p3-flash`, `openrouter/glm-latest`, `openrouter/glm-flash-latest` |
+| GLM (`zai`) | `zai-coding-plan`, `fireworks`, `openrouter` | `glm-5.4`, `glm-5.3`, `glm-5.3-flash`, `fireworks/glm-5p3`, `fireworks/glm-5p3-flash`, `openrouter/glm-latest`, `openrouter/glm-flash-latest` |
 | DeepSeek (`deepseek`) | `fireworks`, `openrouter` | `fireworks/deepseek-v4p1-flash-1017` (and the deprecated `fireworks/deepseek-v4p1-flash`), `openrouter/deepseek-flash-latest` |
 | Anthropic (`anthropic`) | `anthropic` | `anthropic/*` (one source: nothing is hidden) |
 
@@ -2480,7 +2480,7 @@ back to — it passes over a model for any of three reasons:
   price, or any model of its provider does (an Anthropic model only the
   account's list names, or one of yours on `fireworks`, is billed all the
   same). A provider before the sign-in would have been chosen first anyway,
-  so with the catalog's order a Z.AI key still starts on `glm-5.3`; a
+  so with the catalog's order a Z.AI key still starts on `glm-5.4`; a
   provider none of whose models has a price (your own local server, say) is
   no bill and still starts. A sign-in your `provider_order` leaves out is
   never a start, so this rule holds nothing back for it — but the first
@@ -2828,11 +2828,11 @@ does not trust it and prices that usage at the base rates.
 A native model's `vision` key says whether craze may send it images: the
 pictures pasted into the composer (see [Images](tui.md#images)) and the ones
 the `Read` tool returns for an image file. The shipped catalog sets it
-`true` on the models seen to describe a screenshot, and leaves it off on GLM
-5.3 — `glm-5.3`, Z.AI's start model, `fireworks/glm-5p3` and
-`openrouter/glm-latest`. Every shipped Anthropic model takes images, and a
-model only the Anthropic account's list names takes them when the list says it
-does. A model you add defaults to `false`.
+`true` on the models seen to describe a screenshot, Z.AI's start model
+`glm-5.4` among them, and leaves it off on GLM 5.3 — `glm-5.3`,
+`fireworks/glm-5p3` and `openrouter/glm-latest`. Every shipped Anthropic model
+takes images, and a model only the Anthropic account's list names takes them
+when the list says it does. A model you add defaults to `false`.
 
 ```toml
 [models."local/qwen"]

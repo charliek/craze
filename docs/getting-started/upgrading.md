@@ -73,6 +73,21 @@ end `it exits when idle`.
 
 ## Since v0.5.0
 
+### GLM 5.4 on the Z.AI Coding Plan
+
+Nothing needs migrating. `glm-5.4` is GLM 5.4, Z.AI's newest model, on the
+Z.AI Coding Plan (a flat-rate plan, so unpriced like the other Z.AI models):
+a 1M-token window, effort `low`, `high` or `max` (default `max`), and, unlike
+GLM 5.3, it takes images. Z.AI offers it on the Coding Plan only for now, so
+it is not on Fireworks or OpenRouter.
+
+- **The Z.AI Coding Plan starts on `glm-5.4`** (it was `glm-5.3`) for a new
+  session that remembers nothing and has no `default_model`. With the shipped
+  provider order the plan comes first, so any machine with a Z.AI key starts
+  its new sessions on GLM 5.4. A remembered model still wins, as before;
+  write `default_model = "glm-5.3"` in `models.toml` to keep the old start.
+- **`glm-5.3` is not deprecated**: it stays in the pickers and runs as before.
+
 ### A Codex provider
 
 craze can now drive **OpenAI's Codex CLI (`codex app-server`) on your ChatGPT or
@@ -1032,7 +1047,8 @@ older binary should not write it.
   fireworks/deepseek-v4p1-flash-1017`. Signing in again fixes it; so do `--model`, a
   `default_model` pin, a model you picked with `/model` (the model memory),
   or a `provider_order` that lists that provider before `chatgpt`. A Z.AI key,
-  before the plan in the order, still starts on `glm-5.3`, and a model on a
+  before the plan in the order, still starts on Z.AI's start model (now
+  `glm-5.4`), and a model on a
   provider of your own none of whose models has a price still starts. A
   registration a sign-out left behind holds nothing back. A sign-in your
   `provider_order` leaves out holds back no other maker's models, but still

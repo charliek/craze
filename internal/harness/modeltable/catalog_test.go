@@ -155,6 +155,9 @@ func TestShippedCatalog(t *testing.T) {
 		// 2026-11-18: Gemini 4 Neon described an image read from disk
 		// through craze.
 		"openrouter/gemini-4-neon": true,
+		// 2026-11-27: GLM 5.4 on the Z.AI Coding Plan described an image on
+		// the endpoint and read from disk through craze (GLM 5.3 refuses one).
+		"glm-5.4": true,
 		// Plan 050 C5's Muse models through OpenRouter: vision as OpenRouter's
 		// model list says and Meta's direct entries are (both take image
 		// input); live through craze on 2026-11-11 only a tool loop was run on
@@ -371,7 +374,7 @@ func TestShippedCatalogOwnerDecisions(t *testing.T) {
 		}
 	}
 	wantStarts := map[string][]string{
-		"zai-coding-plan": {"glm-5.3"},
+		"zai-coding-plan": {"glm-5.4"},
 		"fireworks":       {"fireworks/deepseek-v4p1-flash-1017"},
 		"openrouter":      {"openrouter/gemini-4-hydrogen"},
 		"meta":            {"muse-spark-1.3-contributor"},

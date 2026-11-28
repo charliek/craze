@@ -571,8 +571,8 @@ func TestStartPickSteps(t *testing.T) {
 
 // TestStartModelOverTheShippedCatalog (plan 038 §4): where a new session with
 // nothing remembered starts on a home with the shipped catalog — Z.AI alone
-// on glm-5.3, Fireworks alone on fireworks/deepseek-v4p1-flash-1017 (the
-// owner's choice of 2026-11-14 from the November 2026 start-model eval; Kimi
+// on glm-5.4 (glm-5.3 before 2026-11-27), Fireworks alone on
+// fireworks/deepseek-v4p1-flash-1017 (the owner's choice of 2026-11-14 from the November 2026 start-model eval; Kimi
 // K3.1 Pro and, before it, Ember-1 were its start), OpenRouter alone on
 // openrouter/gemini-4-hydrogen, Meta alone on muse-spark-1.3-contributor, and
 // with every key the eval winner, Z.AI. The user's pin in
@@ -593,11 +593,11 @@ func TestStartModelOverTheShippedCatalog(t *testing.T) {
 		keys   []string
 		want   Start
 	}{
-		{"Z.AI alone", "", []string{zai}, Start{Alias: "glm-5.3", Effort: "max"}},
+		{"Z.AI alone", "", []string{zai}, Start{Alias: "glm-5.4", Effort: "max"}},
 		{"Fireworks alone", "", []string{fw}, Start{Alias: "fireworks/deepseek-v4p1-flash-1017", Effort: "high"}},
 		{"OpenRouter alone", "", []string{or}, Start{Alias: "openrouter/gemini-4-hydrogen", Effort: "medium"}},
 		{"Meta alone", "", []string{mt}, Start{Alias: "muse-spark-1.3-contributor", Effort: "high"}},
-		{"every key", "", []string{zai, fw, or, mt}, Start{Alias: "glm-5.3", Effort: "max"}},
+		{"every key", "", []string{zai, fw, or, mt}, Start{Alias: "glm-5.4", Effort: "max"}},
 		{"Fireworks and Meta", "", []string{fw, mt}, Start{Alias: "fireworks/deepseek-v4p1-flash-1017", Effort: "high"}},
 		{"a pin beats the order", `default_model = "fireworks/ember-1"`, []string{zai, fw},
 			Start{Alias: "fireworks/ember-1", Effort: "high"}},
@@ -606,7 +606,7 @@ func TestStartModelOverTheShippedCatalog(t *testing.T) {
 		{"a pin keeps Kimi K3.1 Pro as the start", `default_model = "fireworks/kimi-k3p1-pro"`, []string{fw},
 			Start{Alias: "fireworks/kimi-k3p1-pro", Effort: "high"}},
 		{"an unfunded pin gives way to the order", `default_model = "fireworks/ember-1"`, []string{zai},
-			Start{Alias: "glm-5.3", Effort: "max"}},
+			Start{Alias: "glm-5.4", Effort: "max"}},
 		{"the user's order", `provider_order = ["meta", "fireworks", "zai-coding-plan"]`, []string{zai, fw},
 			Start{Alias: "fireworks/deepseek-v4p1-flash-1017", Effort: "high"}},
 		{"an order without the funded provider", `provider_order = ["meta"]`, []string{fw},
