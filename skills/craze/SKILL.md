@@ -12,7 +12,10 @@ craze drives coding agents in sessions of their own: its own **native** agent (o
 Use `craze resolve --role review --json` to see which model can review
 the current caller's work. Run `craze review --role review --changes-since
 main --out /tmp/review.md` to get the full Markdown review and verify the
-worktree after each attempt. Use `craze resolve --role panel --json` to
+worktree after each attempt. For plan or document reviews, attach files
+with repeatable `--prompt-file` and an optional inline focus:
+`craze review --role review --criteria plan --prompt-file plan.md --prompt-file evidence.md "Focus on concurrency and edge cases" --out /tmp/review.md`.
+Use `craze resolve --role panel --json` to
 choose seats independently. For a native sub-agent seat, configure its
 model, effort and read-only permissions on the caller. Antigravity 1.5.18 can edit files and execute shell commands under `--no-force`. Its post-review Git check covers the inspected worktree.
 
@@ -61,7 +64,7 @@ There is no `craze:claude`: Claude Code is the only agent that loads these, and 
 | `grok` | the Grok CLI's agent | |
 | `cursor` | the Cursor agent | |
 | `antigravity` | Google's Antigravity agent (`agy`), on the user's Antigravity plan | needs a craze newer than 0.4.1 (an older one answers `unknown provider "antigravity"`, exit 2); `--model` names a Gemini or other agy model (`gemini-4-neon`, `gemini-4-hydrogen`, …); no `mode=ask` (`--ask`), no web search. `mode=plan` returns agy's plan file and message; agy's plan discipline is its own, not craze's enforcement. Sub-agents agy launches asynchronously may be cut off when the unattended turn ends |
-| `codex` | OpenAI's Codex CLI (`codex app-server`), on the user's ChatGPT or OpenAI account | needs a craze newer than 0.5.0 (an older one answers `unknown provider "codex"`, exit 2); `--model` names a Codex model (`gpt-6.2-sol`, `gpt-6.2-astra`, `gpt-6-luna`, …); supports `--ask` and `--plan` under Codex's OS-enforced read-only sandbox; no web search (`web=`), no `--fast` |
+| `codex` | OpenAI's Codex CLI (`codex app-server`), on the user's ChatGPT or OpenAI account | needs a craze newer than 0.5.0 (an older one answers `unknown provider "codex"`, exit 2); `--model` names a Codex model (`gpt-6.2-sol`, `gpt-6.2-astra`, `gpt-6-luna`, …); supports `--ask` and `--plan` under Codex's OS-enforced read-only sandbox; no web search (`web=`), no `--fast`. Under Codex's default `workspace-write` sandbox, `.git` is read-only and TCP/Unix sockets are blocked — when delegating implementation milestones, instruct Codex to run lint/build and non-socket unit tests and leave socket tests (`make test-cli`) and `git commit` to the caller |
 | `claude` | the user's own Claude Code, on their Claude Pro or Max plan | needs a craze newer than 0.3.0; no `mode=ask` (`--ask`), no web search, no `--fast` (it bills extra usage). From an agent that does not run on claude (Cursor, Grok, Antigravity, Codex, or a native, cursor, grok, antigravity or codex craze session), run it directly: `craze new --wait --timeout 9m --max-message 20000 --provider claude --prompt-file /tmp/craze-delegate-<12 hex digits>.md --remove-prompt-file` |
 
 - **Web search** (`web=` on the agents, `--web-search` on the command; native only; needs a craze newer than 0.2.0). Set `web=on` when the task needs information newer than a model's training or not in the repository: current library or API documentation, release notes and changelogs, looking up an error message, comparing external tools. Leave it off for edits, refactors and reviews of local code. The queries and fetched URLs go to Exa, so do not set it for work the user has called confidential. With no `web=`, the home's own setting applies: off for an unattended run unless the owner turned it on. `web=off` guarantees the session has no web tools. The choice is fixed when the session is created; a follow-up cannot change it. The result's `webSearch` object (with `craze new --wait --json`) reports what was searched and fetched. On an older craze the agent answers `this craze does not support web search; update craze, or run again without web=` and does not retry.
@@ -107,13 +110,14 @@ From Claude Code, dispatch several agents in one message, each in the background
 This is the path for every agent without Claude Code's Agent tool (Cursor, Grok, a craze session), and for your own Bash calls in Claude Code. **Every shell call that waits must be allowed ten minutes** (in Claude Code, Bash `timeout: 600000`; its default is 120 s) and use `--timeout 9m` under it; add `--max-message 20000` so a long answer does not overflow the Bash output (the rest goes to a file named in the output).
 
 ```bash
+craze new --wait --exit-after-turn --timeout 9m --max-message 20000 --provider codex --model gpt-6.2-sol --effort high --prompt-file /tmp/craze-delegate-<12 hex digits>.md --remove-prompt-file
 craze new --wait --timeout 9m --max-message 20000 --provider native --model chatgpt/gpt-6.2-sol --effort high --prompt-file /tmp/craze-delegate-<12 hex digits>.md --remove-prompt-file
 craze new --wait --timeout 9m --max-message 20000 --provider claude --prompt-file /tmp/craze-delegate-<12 hex digits>.md --remove-prompt-file
 craze send 175bfe79 --wait --timeout 9m --max-message 20000 --prompt-file /tmp/craze-delegate-<12 hex digits>.md --remove-prompt-file
 craze wait 175bfe79 --from <handle> --timeout 9m --max-message 20000
 ```
 
-Never name your own provider in `--provider` ([above](#dont-call-yourself)); the claude line is for an agent that does not run on claude (Cursor, Grok, a native, cursor or grok craze session), and needs a craze newer than 0.3.0. Write the prompt to a file (Claude Code's `Write`, or your own file tool) and pass it with `--prompt-file`. Keep the command plain: no variables, `$(...)`, heredoc or `||`. The full command list, statuses, exit codes and handles are in [references/commands.md](references/commands.md).
+Add `--exit-after-turn` (requires craze 0.6.0 or newer; omit on earlier versions) for one-shot delegated milestones so the host stops automatically once the turn completes; omit it when you plan to follow up with `craze send`. Never name your own provider in `--provider` ([above](#dont-call-yourself)); the claude line is for an agent that does not run on claude (Cursor, Grok, a native, cursor or grok craze session), and needs a craze newer than 0.3.0. Write the prompt to a file (Claude Code's `Write`, or your own file tool) and pass it with `--prompt-file`. Keep the command plain: no variables, `$(...)`, heredoc or `||`. The full command list, statuses, exit codes and handles are in [references/commands.md](references/commands.md).
 
 ## Watching and stopping
 
