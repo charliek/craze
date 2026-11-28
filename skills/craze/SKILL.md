@@ -14,7 +14,7 @@ the current caller's work. Run `craze review --role review --changes-since
 main --out /tmp/review.md` to get the full Markdown review and verify the
 worktree after each attempt. For plan or document reviews, attach files
 with repeatable `--prompt-file` and an optional inline focus:
-`craze review --target opus --criteria plan --prompt-file plan.md --prompt-file evidence.md "Focus on concurrency and edge cases" --out /tmp/review.md`.
+`craze review --role review --criteria plan --prompt-file plan.md --prompt-file evidence.md "Focus on concurrency and edge cases" --out /tmp/review.md`.
 Use `craze resolve --role panel --json` to
 choose seats independently. For a native sub-agent seat, configure its
 model, effort and read-only permissions on the caller. Antigravity 1.5.18 can edit files and execute shell commands under `--no-force`. Its post-review Git check covers the inspected worktree.
@@ -117,7 +117,7 @@ craze send 175bfe79 --wait --timeout 9m --max-message 20000 --prompt-file /tmp/c
 craze wait 175bfe79 --from <handle> --timeout 9m --max-message 20000
 ```
 
-Add `--exit-after-turn` for one-shot delegated milestones so the host stops automatically once the turn completes; omit it when you plan to follow up with `craze send`. Never name your own provider in `--provider` ([above](#dont-call-yourself)); the claude line is for an agent that does not run on claude (Cursor, Grok, a native, cursor or grok craze session), and needs a craze newer than 0.3.0. Write the prompt to a file (Claude Code's `Write`, or your own file tool) and pass it with `--prompt-file`. Keep the command plain: no variables, `$(...)`, heredoc or `||`. The full command list, statuses, exit codes and handles are in [references/commands.md](references/commands.md).
+Add `--exit-after-turn` (requires craze 0.6.0 or newer; omit on earlier versions) for one-shot delegated milestones so the host stops automatically once the turn completes; omit it when you plan to follow up with `craze send`. Never name your own provider in `--provider` ([above](#dont-call-yourself)); the claude line is for an agent that does not run on claude (Cursor, Grok, a native, cursor or grok craze session), and needs a craze newer than 0.3.0. Write the prompt to a file (Claude Code's `Write`, or your own file tool) and pass it with `--prompt-file`. Keep the command plain: no variables, `$(...)`, heredoc or `||`. The full command list, statuses, exit codes and handles are in [references/commands.md](references/commands.md).
 
 ## Watching and stopping
 
