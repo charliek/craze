@@ -14,8 +14,8 @@ import (
 )
 
 func (f reviewFlags) checkInputs(words []string) error {
-	if len(words) > 0 && len(f.files) > 0 || f.remove && len(f.files) == 0 {
-		return usagef("craze review: --prompt-file is exclusive with words and required for --remove-prompt-file")
+	if f.remove && len(f.files) == 0 {
+		return usagef("craze review: --remove-prompt-file requires --prompt-file")
 	}
 	stdin := false
 	for _, p := range f.files {
@@ -29,7 +29,7 @@ func (f reviewFlags) checkInputs(words []string) error {
 	return nil
 }
 func (f reviewFlags) readInputs(ctx context.Context, cmd *cobra.Command, words []string) (string, error) {
-	if len(words) > 0 {
+	if len(words) > 0 && len(f.files) == 0 {
 		return checkPrompt(reviewWhat, strings.Join(words, " "), nil)
 	}
 	files := f.files
@@ -38,7 +38,15 @@ func (f reviewFlags) readInputs(ctx context.Context, cmd *cobra.Command, words [
 	}
 	removed := map[string]os.FileInfo{}
 	var out strings.Builder
-	for i, path := range files {
+	if len(words) > 0 {
+		if inline := strings.TrimSpace(strings.Join(words, " ")); inline != "" {
+			if len(inline) > promptTextMax {
+				return "", usageKindf(errkind.Prompt, "craze review: prompt exceeds 512 KiB")
+			}
+			out.WriteString(inline)
+		}
+	}
+	for _, path := range files {
 		if err := ctx.Err(); err != nil {
 			return "", err
 		}
@@ -76,10 +84,12 @@ func (f reviewFlags) readInputs(ctx context.Context, cmd *cobra.Command, words [
 			if f.remove && path != "-" && v.info.Mode().IsRegular() {
 				removed[path] = v.info
 			}
-			if i > 0 {
-				out.WriteString("\n\n")
+			if piece := strings.TrimSpace(v.text); piece != "" {
+				if out.Len() > 0 {
+					out.WriteString("\n\n")
+				}
+				out.WriteString(piece)
 			}
-			out.WriteString(strings.TrimSpace(v.text))
 			if out.Len() > promptTextMax {
 				return "", usageKindf(errkind.Prompt, "craze review: prompt files exceed 512 KiB")
 			}

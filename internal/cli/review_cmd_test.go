@@ -59,6 +59,48 @@ func TestReviewCommandRemovesInputsBeforeCheck(t *testing.T) {
 		t.Fatalf("%+v %v", hosts, e)
 	}
 }
+
+func TestReviewCommandJoinsInlineWordsBeforePromptFiles(t *testing.T) {
+	_, ws, _ := unattendedHome(t)
+	initReviewRepo(t, ws)
+	t.Setenv("CRAZE_FAKE_SCRIPT", "echo")
+	t.Setenv("CRAZE_SESSION_PROVIDER", "")
+	files := []string{filepath.Join(ws, "plan.md"), filepath.Join(ws, "evidence.md")}
+	for i, p := range files {
+		if e := os.WriteFile(p, []byte([]string{"plan body", "spike body"}[i]), 0600); e != nil {
+			t.Fatal(e)
+		}
+	}
+	path := filepath.Join(ws, "reports", "review.md")
+	args := []string{"review", "--provider", "cursor", "--allow-same-provider", "-C", ws, "--prompt-file", files[0], "--prompt-file", files[1], "--remove-prompt-file", "--out", path, "Audit", "concurrency"}
+	_, stderr, code := executeIn(args, strings.NewReader(""))
+	text, err := os.ReadFile(path)
+	if err != nil || code != 0 || !strings.Contains(string(text), "Audit concurrency\n\nplan body\n\nspike body") {
+		t.Fatalf("exit %d file %q %v stderr %q", code, text, err, stderr)
+	}
+	for _, p := range files {
+		if _, e := os.Lstat(p); !os.IsNotExist(e) {
+			t.Fatalf("input survived: %v", e)
+		}
+	}
+}
+
+func TestReviewCombinedPromptOverflowPreservesRemovePromptFile(t *testing.T) {
+	_, ws, _ := unattendedHome(t)
+	initReviewRepo(t, ws)
+	big := filepath.Join(ws, "big.md")
+	if err := os.WriteFile(big, bytes.Repeat([]byte("a"), promptTextMax-4), 0600); err != nil {
+		t.Fatal(err)
+	}
+	args := []string{"review", "--json", "--provider", "cursor", "--allow-same-provider", "-C", ws, "--prompt-file", big, "--remove-prompt-file", "extra words"}
+	out, _, code := executeIn(args, bytes.NewReader(nil))
+	if code != 2 || !json.Valid([]byte(out)) {
+		t.Fatalf("exit %d out %s", code, out)
+	}
+	if _, err := os.Lstat(big); err != nil {
+		t.Fatalf("oversized input should not be deleted: %v", err)
+	}
+}
 func TestReviewTerminalStatuses(t *testing.T) {
 	for _, tc := range []struct {
 		script, mode, status, kind string
@@ -134,7 +176,7 @@ func TestReviewWritesCompleteFileBeforeBrokenPipe(t *testing.T) {
 func TestReviewBundleAndInvalidInputs(t *testing.T) {
 	ws := t.TempDir()
 	initReviewRepo(t, ws)
-	for _, args := range [][]string{{"--role", "panel"}, {"--bundle-only"}, {"--bundle-only", "--changes-since", "--bad"}, {"--prompt-file", "-", "--prompt-file", "-"}, {"--model", "x"}, {"--target", "sol", "--role", "review"}} {
+	for _, args := range [][]string{{"--role", "panel"}, {"--bundle-only"}, {"--bundle-only", "--changes-since", "--bad"}, {"--prompt-file", "-", "--prompt-file", "-"}, {"--remove-prompt-file", "words"}, {"--model", "x"}, {"--target", "sol", "--role", "review"}} {
 		out, _, code := executeIn(append([]string{"review", "--json", "-C", ws}, args...), bytes.NewReader(nil))
 		if code != 2 || !json.Valid([]byte(out)) {
 			t.Fatalf("%q exit %d, %s", args, code, out)

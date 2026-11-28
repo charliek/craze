@@ -3276,7 +3276,7 @@ craze review --bundle-only --changes-since main
 | `--allow-paid-fallback` | Admit eligible API-key and metered credentials, including direct provider requests. |
 | `--effort`, `--timeout`, `--stall-timeout` | Override the model effort, total command time or maximum silence after submission. The default cap is the target's cap. The stall default is 10 minutes and 0 disables it. |
 | `-C`, `--dir` | Select the workspace for Git and the provider. |
-| `--prompt-file`, `--remove-prompt-file` | Join repeatable files in order with blank lines. Use `-` once for stdin. Removal deletes regular input files after reading, before integrity checks. Positional words and prompt files are exclusive. |
+| `--prompt-file`, `--remove-prompt-file` | Join repeatable files in order with blank lines. Use `-` once for stdin. Positional words may accompany `--prompt-file` and are prepended before the files. Removal deletes regular input files after reading, before integrity checks. |
 | `--criteria` | Select correctness, adversarial, plan or custom review criteria. Changes alone select correctness. Piped stdin can supply an additional request. |
 | `--changes-since` | Freeze a commit and collect the net committed, staged, unstaged and untracked changes. Binary and large untracked content gets a summary. |
 | `--keep-bundle`, `--bundle-only` | Keep a spilled diff after review or prepare a bundle without running a host. Bundle-only requires a ref and preserves the spill for the caller. |
