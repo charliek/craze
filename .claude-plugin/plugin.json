@@ -1,6 +1,6 @@
 {
   "name": "craze",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Sub-agents for Claude Code that run on other models through craze: delegate a task to a native, Grok, Cursor, Antigravity or Codex session and get its result back. Its skill shows any agent (Claude Code, Cursor, Grok, Antigravity, Codex or a craze session) how to hand work to another provider through craze, Claude included, and never to its own.",
   "author": {
     "name": "Charlie Knudsen",
