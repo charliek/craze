@@ -2,6 +2,120 @@
 
 Each release gets its own section headed `## vX.Y.Z — YYYY-MM-DD`, newest first.
 
+## v0.6.0 — 2026-11-28
+
+craze can drive OpenAI's Codex CLI (`codex app-server`) on your ChatGPT or
+OpenAI account (the `codex` provider), and runs unattended cross-provider code
+reviews with `craze review`, routed by `craze resolve`'s subscription-first
+targets. Native OpenAI models move to a persistent WebSocket, the TUI moves to
+the Charm v2 stack with grouped transcript activity and revised themes, and
+GLM 5.4 is the Z.AI Coding Plan's start model. Nothing in `~/.craze` needs
+migrating: [Upgrading](docs/getting-started/upgrading.md) lists every change
+in behaviour; restart a running hub after upgrading.
+
+### Behaviour changes
+
+- **Every provider listing has a sixth row, `codex`**, between antigravity and
+  native (`craze providers`, the picker, `/provider`, the hub's create
+  options); the unknown-provider and no-default errors name it too.
+  `--provider codex` used to exit 2. `[agents].codex` in `config.toml` is
+  read: `codex`'s absolute path.
+- **`craze new` refuses the calling agent's own provider** on codex:
+  `CODEX_THREAD_ID` is a fourth caller marker beside `CLAUDECODE`,
+  `CURSOR_AGENT` and `ANTIGRAVITY_AGENT`.
+- **New commands `craze review` and `craze resolve`**, and `config.toml` reads
+  `[routing]`, `[targets.*]` and `[roles.*]`, which only those two commands
+  use: an invalid one makes them fail closed, and nothing else changes.
+- **Native `chatgpt` and `openai` models use a WebSocket** on OpenAI's
+  Responses API by default, falling back to HTTP SSE. `openai_transport =
+  "sse"` in `config.toml`, or `CRAZE_OPENAI_TRANSPORT=sse`, keeps SSE. On
+  OpenAI's endpoints the system prompt is sent as a leading `developer`
+  message instead of `instructions` (prompt-cache hits rose from about 81% to
+  97–100%); other endpoints are unchanged.
+- **The Z.AI Coding Plan starts on `glm-5.4`** (it was `glm-5.3`) for a new
+  session that remembers nothing and has no `default_model`.
+- **The transcript starts in Grouped layout**: neighbouring successful lookups
+  fold into one row (`▸ Explored · 3 reads`). `F2` cycles Grouped, Compact and
+  Classic (one row per tool call, the old look).
+- **The seven theme names select revised palettes**, and `high-contrast` is
+  new.
+- **`Shift+Enter` inserts a newline** where the terminal reports Shift (xterm
+  and Kitty forms); `Ctrl+J` does everywhere.
+
+### The codex provider
+
+- `codex app-server` over JSON-RPC: the account's live model list with each
+  model's efforts (including `ultra`), streaming, `apply_patch` diffs and
+  `files`, approval and question cards under `--no-force`, `turn/steer`
+  interjection, sub-agent rows, skills, resume with paginated history, and
+  token usage and rate-limit windows (compact windows such as `24h`, `1d` and
+  `15m` render on the status row beside `5h` and `7d`).
+- `--ask` and `--plan` run inside Codex's OS-enforced read-only sandbox with
+  `approvalPolicy: "never"`, also when resuming a writable thread. Codex hooks
+  and MCP servers run outside that sandbox.
+- craze never signs in for `codex`: a logged-out `codex` is an `auth` error
+  naming `codex login`.
+
+### `craze review` and `craze resolve`
+
+- `craze review` runs an unattended review in a dedicated host and prints the
+  final Markdown: by role (`review`, `adversarial-review`), target (`sol`,
+  `astra`, `neon`, `opus`, `fable`, with `@version` or `--version`), or
+  `--provider`/`--model`. `--changes-since <ref>` bundles the net committed,
+  staged, unstaged and untracked changes, spilling a large diff to a private
+  `changes.diff`; `--bundle-only` prepares the bundle without a review.
+- Reviews are read-only by provider (Codex's sandbox, native's read, grep and
+  glob, Claude without its edit tools or Bash), and a Git integrity check after
+  each host stops (`--dirty-check fail|warn|off`) catches any write: the
+  default delivers the review with exit 3. Antigravity 1.5.18 was seen writing
+  without asking, so `neon` is last in `review` and left out of
+  `adversarial-review`.
+- A failed route falls back to the next eligible one without crossing onto an
+  API key or metered billing unless `allow_paid_fallback` or
+  `--allow-paid-fallback` says so.
+- `--prompt-file` (repeatable, `-` for stdin) and `--remove-prompt-file`;
+  positional words may accompany `--prompt-file` and go before the files.
+  `--criteria`, `--out`, `--timeout`, `--stall-timeout` and `--json`.
+- `craze resolve` previews a target's or role's routes, their billing and the
+  fallbacks, offline: no network, no file writes.
+- Replacing the plugin's `codex-run.py`: its exit 4 (empty) and 5 (stall) are
+  3, and its 6 (time cap) is 5 ([Upgrading](docs/getting-started/upgrading.md#moving-from-codex-runpy-to-craze-review)).
+
+### Native
+
+- The WebSocket transport chains turns with `previous_response_id`, recovers
+  before output (a renewed sign-in, a stale response id, a connection limit, a
+  dead idle socket) and falls back to SSE; `/btw` always runs over stateless
+  SSE so it never disturbs the main chain.
+- **`glm-5.4`**: GLM 5.4 on the Z.AI Coding Plan, a 1M-token window, effort
+  `low`, `high` or `max` (default `max`), and image input, which GLM 5.3
+  lacks. `glm-5.3` is not deprecated.
+
+### The terminal UI
+
+- Bubble Tea, Bubbles and Lip Gloss move to v2. Redraws are smaller (typing
+  six characters into the composer sent 1,032 bytes before, 171 now).
+- `F4` inspects transcript rows with the keyboard and expands a group into its
+  calls; `Ctrl+O` still expands everything. Failed calls, shell commands,
+  active work, replies and approvals are never grouped. A layout lasts for the
+  terminal, saved sessions included.
+- The theme picker (`Ctrl+G` or `/theme`) previews a palette live on a sample
+  and sizes itself to the rows it shows; `Esc` restores the theme you started
+  with.
+
+### The Claude Code plugin
+
+- `craze:delegate` takes `codex` targets and `effort=ultra`, and every agent's
+  no-self rule names Codex.
+- The `craze` skill documents `craze review` (including `--criteria plan` with
+  a `--prompt-file` and focus words), Codex's `workspace-write` sandbox limits
+  and `--exit-after-turn` for one-shot delegated runs.
+
+### Tests
+
+- `TestClaudeForeignSessionNoUsage` waits for its asynchronous silence note (a
+  macOS `-race` flake on the v0.5.0 tag).
+
 ## v0.5.0 — 2026-11-24
 
 craze can drive Google's Antigravity CLI, `agy`, on your own Antigravity plan
