@@ -1,8 +1,6 @@
 # Upgrading
 
-Start with the [transcript and theme changes](#transcript-layouts-and-themes). Earlier releases are listed below.
-
-Eight sections: [since v0.5.0](#since-v050), the changes after v0.5.0;
+Eight sections: [since v0.5.0](#since-v050), v0.6.0's;
 [since v0.4.1](#since-v041), v0.5.0's;
 [since v0.4.0](#since-v040), v0.4.1's;
 [since v0.3.0](#since-v030), v0.4.0's; [since v0.2.0](#since-v020), the fifth release's; [since v0.1.1](#since-v011), the third release's; [since
@@ -10,34 +8,6 @@ v0.1.0](#since-v010), the second release's; and [from v0.0.1](#from-v001), the
 first release's. Whatever the version, [upgrading
 while sessions run](#upgrading-while-sessions-run) says what an upgrade does
 to the hub and the sessions already running.
-
-## Terminal keyboard input
-
-Craze now asks compatible terminals to report modified keys. `Shift+Enter`
-inserts a newline when the terminal reports Shift. If the terminal sends a
-plain Enter, use `Ctrl+J` to insert a newline.
-
-## Native OpenAI WebSocket transport
-
-Native `chatgpt` and `openai` models now default to a persistent WebSocket on
-OpenAI's Responses API, with automatic fallback to HTTP SSE. To use HTTP SSE
-from the start, set `openai_transport = "sse"` in `config.toml` or start the
-host with `CRAZE_OPENAI_TRANSPORT=sse`.
-
-Both transports send the system prompt as a `developer` input message on
-OpenAI's endpoint for higher prefix-cache hit rates.
-[Native OpenAI transport](../reference/configuration.md#native-openai-transport)
-
-## Transcript layouts and themes
-
-A new terminal starts in Grouped layout. Press `F2` to cycle through Compact
-and Classic. Classic shows one row per tool call. Use `F4` to inspect details
-with the keyboard, or `Ctrl+O` to expand the transcript. Saved sessions use
-the same layouts when you reopen them.
-
-All seven existing theme names still select their revised palettes. Use
-`/theme high-contrast` for stronger contrast, or open `/theme` to preview a
-palette before saving it.
 
 ## Upgrading while sessions run
 
@@ -129,6 +99,42 @@ use. What changes:
   approval prompts, no disk writes through shell or `apply_patch`); Codex hooks
   and MCP servers still run outside Codex's command sandbox
   ([the provider's page](../reference/configuration.md#the-codex-provider)).
+
+### Moving from codex-run.py to craze review
+
+Use `craze review --changes-since main --out /tmp/review.md` to write the
+full review. The legacy runner's empty-response exit 4 becomes 3
+(`empty`), its stall exit 5 becomes 3 (`stalled`), and its time-cap exit
+6 becomes 5 (`timed_out`). A review that needs input exits 4. Use the
+JSON error kind to distinguish failures that share an exit code.
+
+### Native OpenAI WebSocket transport
+
+Native `chatgpt` and `openai` models now default to a persistent WebSocket on
+OpenAI's Responses API, with automatic fallback to HTTP SSE. To use HTTP SSE
+from the start, set `openai_transport = "sse"` in `config.toml` or start the
+host with `CRAZE_OPENAI_TRANSPORT=sse`.
+
+Both transports send the system prompt as a `developer` input message on
+OpenAI's endpoint for higher prefix-cache hit rates.
+[Native OpenAI transport](../reference/configuration.md#native-openai-transport)
+
+### Transcript layouts and themes
+
+A new terminal starts in Grouped layout. Press `F2` to cycle through Compact
+and Classic. Classic shows one row per tool call. Use `F4` to inspect details
+with the keyboard, or `Ctrl+O` to expand the transcript. Saved sessions use
+the same layouts when you reopen them.
+
+All seven existing theme names still select their revised palettes. Use
+`/theme high-contrast` for stronger contrast, or open `/theme` to preview a
+palette before saving it.
+
+### Terminal keyboard input
+
+Craze now asks compatible terminals to report modified keys. `Shift+Enter`
+inserts a newline when the terminal reports Shift. If the terminal sends a
+plain Enter, use `Ctrl+J` to insert a newline.
 
 ## Since v0.4.1
 
@@ -1595,11 +1601,3 @@ them:
 not. A `~/.cache/craze` that already exists with a looser mode than `0700` is
 refused, and craze never changes it: `chmod 700` it or remove it, or run with
 `CRAZE_DETACH=0`. See [The craze directory](../reference/configuration.md#the-craze-directory).
-
-## Moving from codex-run.py to craze review
-
-Use `craze review --changes-since main --out /tmp/review.md` to write the
-full review. The legacy runner's empty-response exit 4 becomes 3
-(`empty`), its stall exit 5 becomes 3 (`stalled`), and its time-cap exit
-6 becomes 5 (`timed_out`). A review that needs input exits 4. Use the
-JSON error kind to distinguish failures that share an exit code.

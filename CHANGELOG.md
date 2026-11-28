@@ -10,8 +10,9 @@ reviews with `craze review`, routed by `craze resolve`'s subscription-first
 targets. Native OpenAI models move to a persistent WebSocket, the TUI moves to
 the Charm v2 stack with grouped transcript activity and revised themes, and
 GLM 5.4 is the Z.AI Coding Plan's start model. Nothing in `~/.craze` needs
-migrating: [Upgrading](docs/getting-started/upgrading.md) lists every change
-in behaviour; restart a running hub after upgrading.
+migrating: [Upgrading, since
+v0.5.0](docs/getting-started/upgrading.md#since-v050) lists every change in
+behaviour; restart a running hub after upgrading.
 
 ### Behaviour changes
 
