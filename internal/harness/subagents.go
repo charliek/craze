@@ -1220,14 +1220,16 @@ func (s *Session) childOpenOptions(v tableView, alias, effort string, c *ChildOp
 		Model: alias, Effort: effort, Prompt: s.base.prompt.clone(), Snapshot: s.base.snapshot, Child: c,
 		NewModel: s.newModel, Getenv: s.getenv, Now: s.base.now, Version: s.base.version,
 		MatchModel: v.match, Warn: s.warn, ProviderRetries: &s.providerRetries,
-		Web:   s.base.web.forChild(),
-		tools: s.base.seams,
+		OpenAITransport: s.base.openAITransport,
+		Web:             s.base.web.forChild(),
+		tools:           s.base.seams,
 	}
 }
 
 // childBase is what a session keeps of its Options for the children it
 // starts (§3.2: everything but the child's own is the parent's).
 type childBase struct {
+	openAITransport          string
 	home, workspace, version string
 	now                      func() time.Time
 	prompt                   PromptExtras // a clone, taken at Open

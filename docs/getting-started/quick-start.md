@@ -155,6 +155,11 @@ them connected:
 | OpenRouter | `openrouter` | `OPENROUTER_API_KEY` |
 | Z.AI Coding Plan | `zai-coding-plan` | `ZHIPU_API_KEY` or `ZAI_API_KEY` |
 
+Native `chatgpt` and `openai` models use a persistent WebSocket on OpenAI's
+Responses API with automatic HTTP SSE fallback. Set `openai_transport = "sse"`
+in `config.toml` to use HTTP SSE from the start.
+[Native OpenAI transport](../reference/configuration.md#native-openai-transport)
+
 1. Connect one, either of two ways:
 
     **With a ChatGPT plan**, sign in instead of giving a key:

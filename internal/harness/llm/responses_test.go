@@ -152,7 +152,7 @@ func (s *rxServer) requests() []rxRequest {
 // redirected to the server.
 func (s *rxServer) model(t *testing.T, r modeltable.Resolved, auth Auth) *responsesModel {
 	t.Helper()
-	m, err := newResponsesModel(r, auth, "", redirectClient(t, s.srv.URL))
+	m, err := newResponsesModel(r, "", options{auth: auth, httpClient: redirectClient(t, s.srv.URL)})
 	if err != nil {
 		t.Fatalf("newResponsesModel: %v", err)
 	}
@@ -331,8 +331,8 @@ func golden(t *testing.T, name string, got []byte) {
 
 // TestResponsesToolLoop runs one turn through Fantasy's agent — a reasoning
 // step that calls a tool, then the answer — and pins both requests whole
-// (testdata/responses_tool_loop.golden): the system prompt as instructions
-// (no system item), the tools in the craze namespace, the effort and the
+// (testdata/responses_tool_loop.golden): the system prompt as the first
+// developer item, the tools in the craze namespace, the effort and the
 // reasoning summary, the encrypted reasoning included and, on the second
 // request, replayed from the item's end with its id, before the call it led
 // to; the call and its output by call_id. The output ceiling, temperature and
@@ -403,7 +403,7 @@ func TestResponsesToolLoop(t *testing.T) {
 		if err := json.Unmarshal(req.body, &fields); err != nil {
 			t.Fatal(err)
 		}
-		for _, f := range []string{"max_output_tokens", "temperature", "top_p"} {
+		for _, f := range []string{"instructions", "max_output_tokens", "temperature", "top_p"} {
 			if _, ok := fields[f]; ok {
 				t.Errorf("request %d sends %s", i, f)
 			}
@@ -607,14 +607,11 @@ func TestResponsesReplaysOnlySafeReasoning(t *testing.T) {
 				t.Errorf("summary = %s", s)
 			}
 		}
-		if it["type"] == "message" && it["role"] == "system" {
-			t.Error("a system item was sent")
-		}
 	}
 	if !slices.Equal(replayed, []string{"rs_good"}) {
 		t.Fatalf("replayed reasoning %v, want only rs_good", replayed)
 	}
-	want := []string{"message/user", "reasoning/rs_good", "function_call/call_1", "function_call_output/call_1",
+	want := []string{"message/developer", "message/user", "reasoning/rs_good", "function_call/call_1", "function_call_output/call_1",
 		"function_call/call_2", "function_call_output/call_2", "function_call/call_3", "function_call_output/call_3",
 		"function_call/call_4", "function_call_output/call_4", "message/assistant", "message/user"}
 	if got := itemTypes(items); !slices.Equal(got, want) {
@@ -1081,15 +1078,15 @@ func TestResponsesGenerateCollectsTheStream(t *testing.T) {
 
 // TestNewResponsesModelRefusesWhatCannotBeBuilt: no sign-in, no wire model.
 func TestNewResponsesModelRefusesWhatCannotBeBuilt(t *testing.T) {
-	if _, err := newResponsesModel(chatgpt(), nil, "", nil); err == nil {
+	if _, err := newResponsesModel(chatgpt(), "", options{}); err == nil {
 		t.Error("a model with no Auth was built")
 	}
 	r := chatgpt()
 	r.WireModel = " "
-	if _, err := newResponsesModel(r, newStaticAuth(chatgptToken), "", nil); err == nil {
+	if _, err := newResponsesModel(r, "", options{auth: newStaticAuth(chatgptToken)}); err == nil {
 		t.Error("a model with no wire model was built")
 	}
-	m, err := newResponsesModel(chatgpt(), newStaticAuth(chatgptToken), "", nil)
+	m, err := newResponsesModel(chatgpt(), "", options{auth: newStaticAuth(chatgptToken)})
 	if err != nil || m.Provider() != "chatgpt" || m.Model() != "gpt-5.6-luna" {
 		t.Fatalf("model %v, err %v", m, err)
 	}

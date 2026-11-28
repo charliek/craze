@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"charm.land/fantasy"
+	"github.com/charliek/craze/internal/harness/llm"
 	"github.com/charliek/craze/internal/harness/store"
 )
 
@@ -337,7 +338,7 @@ func (g asideGate) Stream(ctx context.Context, call fantasy.Call) (fantasy.Strea
 	if g.refusing.Load() {
 		return nil, ErrStoredKeyFrozen
 	}
-	return g.LanguageModel.Stream(ctx, call)
+	return g.LanguageModel.Stream(llm.WithStateless(ctx), call)
 }
 
 // asideEnded is the error a side question whose request context ended

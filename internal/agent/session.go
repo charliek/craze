@@ -1399,6 +1399,9 @@ type Options struct {
 	// (harness.Options.ProviderRetries): nil is the harness's default. Only a
 	// native session reads it; an ACP agent keeps its own retries.
 	ProviderRetries *int
+	// OpenAITransport is config.toml's openai_transport. Native sessions
+	// resolve the CRAZE_OPENAI_TRANSPORT override when they open.
+	OpenAITransport string
 	// WebSearch is config.toml's `websearch` (plan 051 §C.1), which the CLI
 	// reads (tui.ConfigWebSearch): half of whether a native session is
 	// offered the web tools (DecideWeb). The zero value is no key, which

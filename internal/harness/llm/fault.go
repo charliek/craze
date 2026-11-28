@@ -33,7 +33,7 @@ func retracts(ctx context.Context) bool { return ctx.Value(retractionKey{}) != n
 // which is all a rebuilt or driver-made ProviderError has to say so.
 const transportTitle = "stream transport error"
 
-// protocolTitle is the title of a stream that broke its protocol (messagesError):
+// protocolTitle is the title of a Messages or Responses stream that broke its protocol:
 // retried before any output, as an incomplete stream is, and final after it. A
 // malformed response is no transport's failure, and the same request may get it
 // again.

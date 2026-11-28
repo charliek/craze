@@ -15,7 +15,9 @@ import (
 	"time"
 
 	"charm.land/fantasy"
+	"github.com/charliek/craze/internal/harness/llm/responsesapi"
 	"github.com/charliek/craze/internal/harness/modeltable"
+	"github.com/coder/websocket"
 )
 
 // h2Server speaks HTTP/2 in the clear, so that a handler's abort is the real
@@ -589,4 +591,123 @@ func TestALongRetryAfterAfterOutputStaysFinal(t *testing.T) {
 			t.Fatalf("err = %v (%T); want a retryable error", err, err)
 		}
 	})
+}
+
+// responsesTimeout has the same error chain as the Responses client's
+// internal read timer. Its cause signals an incomplete stream.
+type responsesTimeout struct{}
+
+func (responsesTimeout) Error() string   { return "WebSocket read timed out" }
+func (responsesTimeout) Timeout() bool   { return true }
+func (responsesTimeout) Temporary() bool { return false }
+func (responsesTimeout) Unwrap() error   { return responsesapi.ErrIncomplete }
+
+func TestResponsesTimeoutFault(t *testing.T) {
+	m := &model{scrub: newScrubber(canary, nil)}
+	timeout := responsesError(responsesTimeout{})
+	var pe *fantasy.ProviderError
+	if !errors.As(timeout, &pe) || !errors.Is(timeout, responsesapi.ErrIncomplete) || !streamFault(timeout) {
+		t.Fatalf("internal timeout = %v (%T), want wrapped transport fault", timeout, timeout)
+	}
+	if err := m.stepError(timeout, true, true); !retried(err) {
+		t.Fatalf("internal timeout after output = %v, want retryable", err)
+	}
+	if err := m.stepError(responsesError(context.DeadlineExceeded), true, true); !errors.Is(err, context.DeadlineExceeded) || retried(err) {
+		t.Fatalf("caller deadline = %v, want final deadline", err)
+	}
+}
+
+func TestResponsesWebSocketFaults(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		after bool
+		fail  func(context.Context, *websocket.Conn)
+		retry bool
+		title string
+	}{
+		{"abnormal close 1006 / EOF", true, func(_ context.Context, c *websocket.Conn) {
+			_ = c.CloseNow()
+		}, true, transportTitle},
+		{"internal close 1011", true, func(_ context.Context, c *websocket.Conn) {
+			_ = c.Close(websocket.StatusInternalError, "failed")
+		}, true, transportTitle},
+		{"binary before output", false, func(ctx context.Context, c *websocket.Conn) {
+			_ = c.Write(ctx, websocket.MessageBinary, []byte("binary"))
+		}, true, protocolTitle},
+		{"binary after output", true, func(ctx context.Context, c *websocket.Conn) {
+			_ = c.Write(ctx, websocket.MessageBinary, []byte("binary"))
+		}, false, ""},
+		{"read limit before output", false, func(ctx context.Context, c *websocket.Conn) {
+			_ = c.Write(ctx, websocket.MessageText, make([]byte, (32<<20)+1))
+		}, true, protocolTitle},
+		{"read limit after output", true, func(ctx context.Context, c *websocket.Conn) {
+			_ = c.Write(ctx, websocket.MessageText, make([]byte, (32<<20)+1))
+		}, false, ""},
+		{"retry after 60 seconds", true, func(ctx context.Context, c *websocket.Conn) {
+			_ = c.Write(ctx, websocket.MessageText, []byte(`{"type":"error","status":503,"headers":{"Retry-After":"60"},"error":{"type":"server_error","message":"busy"}}`))
+		}, false, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				c, err := websocket.Accept(w, r, nil)
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				defer func() { _ = c.CloseNow() }()
+				ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+				defer cancel()
+				if _, _, err := c.Read(ctx); err != nil {
+					t.Error(err)
+					return
+				}
+				if tc.after {
+					for _, frame := range []string{
+						`{"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_1"}}`,
+						`{"type":"response.output_text.delta","output_index":0,"delta":"partial"}`,
+					} {
+						if err := c.Write(ctx, websocket.MessageText, []byte(frame)); err != nil {
+							t.Error(err)
+							return
+						}
+					}
+				}
+				tc.fail(ctx, c)
+			}))
+			defer srv.Close()
+			lm, err := New(openaiRoute(srv.URL+"/v1"), WithOpenAITransport("websocket"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = CloseModel(lm) }()
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			defer cancel()
+			text, err := stepOn(t, WithRetraction(ctx), lm)
+			if (text == "partial") != tc.after || err == nil || retried(err) != tc.retry {
+				t.Fatalf("text %q, err %v (%T), want output %v and retry %v", text, err, err, tc.after, tc.retry)
+			}
+			if tc.title != "" {
+				var pe *fantasy.ProviderError
+				if !errors.As(err, &pe) || pe.Title != tc.title {
+					t.Fatalf("error = %v (%T), want title %q", err, err, tc.title)
+				}
+			} else {
+				var mid *MidStreamError
+				if !errors.As(err, &mid) {
+					t.Fatalf("err = %v (%T), want MidStreamError", err, err)
+				}
+			}
+		})
+	}
+}
+
+func TestResponsesWSMessageTooBigIsFinal(t *testing.T) {
+	err := responsesError(responsesapi.ErrWSMessageTooBig)
+	var fe *FinalError
+	if !errors.As(err, &fe) || fe.Code != "websocket_message_too_large" {
+		t.Fatalf("err = %v (%T), want *FinalError(websocket_message_too_large)", err, err)
+	}
+	if retried(err) {
+		t.Fatalf("ErrWSMessageTooBig must not be retried: %v", err)
+	}
 }

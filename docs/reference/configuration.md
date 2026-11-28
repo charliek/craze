@@ -7,9 +7,10 @@ about it in the session index (`~/.craze/sessions.jsonl`) that
 index](#session-index). Every session also writes a [journal](#session-journal)
 of what happened in it, which can contain secrets and can be turned off.
 `config.toml` also holds the switches `journal`, `control_socket`, `detach`,
-`host_idle_exit`, `host_idle_exit_unattended`, `terminal_title`, `background`, `host_status` and
-[`provider_retries`](#native-provider-retries), the
-[`websearch`](#native-web-search) setting, the
+`host_idle_exit`, `host_idle_exit_unattended`, `terminal_title`, `background`, and `host_status`, the
+[`provider_retries`](#native-provider-retries),
+[`openai_transport`](#native-openai-transport), and
+[`websearch`](#native-web-search) settings, the
 [`[agents]`](#agent-binaries) table, and the
 [`[compat.claude]`](#claude-content-compatclaude) table that says which of
 Claude's own files a native session reads. Session flags (`--workspace`, `--model`, `--effort`, `--fast` / `--no-fast`,
@@ -2134,6 +2135,29 @@ session goes on with the client its model was built with: the new driver
 reaches it when it next builds one, in a new or resumed session or at a switch
 to another model.
 
+### Native OpenAI transport
+
+Set the top-level `openai_transport` key in `config.toml` to choose how native
+`chatgpt` and `openai` models connect to OpenAI's Responses API.
+
+| Value | Behavior |
+|-------|----------|
+| `"auto"` | Uses a persistent WebSocket on OpenAI's endpoint and automatically falls back to HTTP server-sent events (SSE). If the server declines the upgrade or the connection repeatedly fails, fallback can become sticky. Craze then uses SSE for that route and endpoint for the life of the process. This is the default on OpenAI's endpoint. |
+| `"websocket"` | Requires WebSocket for the main turn on eligible endpoints and reports connection failures. Side questions and concurrent requests while the WebSocket is busy use HTTP SSE. |
+| `"sse"` | Always uses HTTP SSE. |
+
+Other Responses endpoints, including non-loopback proxies configured under
+`[providers.openai]`, use HTTP SSE. Loopback IP literals (`127.0.0.0/8`, `::1`)
+under `[providers.openai]` follow OpenAI's endpoint rules for local endpoints.
+Selecting `"websocket"` for a non-OpenAI endpoint also prints a warning when
+the model is opened or switched to.
+
+`CRAZE_OPENAI_TRANSPORT` overrides the file when set to a valid value. Both
+settings accept any letter case and ignore surrounding whitespace. Invalid
+values print a diagnostic and fall back to the next applicable setting. An
+already-running host keeps the setting it started with. Hosts started by the
+hub inherit the hub's environment.
+
 ### Native provider retries
 
 `provider_retries` in `config.toml` says how many times a native step's model
@@ -3140,6 +3164,7 @@ same turn is waited on again, and craze does not read them back.
 | `CRAZE_HOME` | The [craze directory](#the-craze-directory) (default `~/.craze`): `config.toml` and the [session index](#session-index) live directly inside it. Skills and plugin caches still follow `HOME` |
 | `CRAZE_AGENT_BIN` | The launch's own provider's agent binary when `--agent-bin` is unset; never a session of another provider's ([Agent binaries](#agent-binaries)) |
 | `CRAZE_PROVIDER` | Provider id when `--provider` is unset (`cursor`, `grok`, `claude` or `native`) |
+| `CRAZE_OPENAI_TRANSPORT` | Overrides [`openai_transport`](#native-openai-transport) for a new native host (`auto`, `websocket`, or `sse`) |
 | `CRAZE_SESSION_PROVIDER` | Set by craze: every ACP agent a session spawns gets the session's provider id here (`cursor`, `grok`, `claude`), and so does every shell command a native session runs (`native`), replacing any it inherited, so a program the agent runs can tell which craze session it is inside. `craze new` reads it first to tell which provider the agent running it is on, and [refuses to start that same provider](cli.md#starting-your-own-provider) (exit 2) unless `--allow-same-provider` is given. [The hub](cli.md#the-hub) removes it from its hosts' environment |
 | `CLAUDE_CODE_EXECUTABLE` | The `claude` a [claude session](#the-claude-provider) runs, when it is not the one on `PATH`. craze sets it in the adapter's environment to the path it resolved |
 | `CRAZE_JOURNAL` | Turns the [session journal](#session-journal) off for this run when it reads as false. It cannot turn one on against `journal = false`, and a value craze cannot read as a bool turns it off with one line saying so. Empty or unset leaves the decision to the config file |

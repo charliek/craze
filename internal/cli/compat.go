@@ -40,3 +40,13 @@ func providerRetries(diag io.Writer) *int {
 	}
 	return &n
 }
+
+// openAITransport passes the config setting to the session and reports any
+// invalid value on craze's diagnostic stream.
+func openAITransport(diag io.Writer) string {
+	mode, why := tui.ConfigOpenAITransport()
+	if why != "" && diag != nil {
+		fmt.Fprintf(diag, "craze: %s\n", why)
+	}
+	return mode
+}

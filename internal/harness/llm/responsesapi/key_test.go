@@ -53,7 +53,7 @@ func keyRequest() Request {
 // items are as they were after the key route's body was built.
 func TestKeyRouteBody(t *testing.T) {
 	r := keyRequest()
-	body, err := r.body(RouteKey)
+	body, err := r.bodyWith(RouteKey, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,17 +110,17 @@ func TestKeyRouteBody(t *testing.T) {
 
 	bare := fullRequest()
 	bare.Tools, bare.Instructions, bare.Effort = nil, "", ""
-	body, err = bare.body(RouteKey)
+	body, err = bare.bodyWith(RouteKey, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got, want := slices.Sorted(maps.Keys(topLevel(t, body))), []string{"include", "input", "model", "reasoning", "store", "stream"}; !slices.Equal(got, want) {
 		t.Fatalf("with no tools, ceiling or key: top-level keys = %v, want %v", got, want)
 	}
-	if _, err := (Request{}).body(RouteKey); err == nil {
+	if _, err := (Request{}).bodyWith(RouteKey, false); err == nil {
 		t.Error("a request with no model built a body")
 	}
-	if _, err := fullRequest().body(Route(9)); err == nil {
+	if _, err := fullRequest().bodyWith(Route(9), false); err == nil {
 		t.Error("an unknown route built a body")
 	}
 }
@@ -156,7 +156,7 @@ func TestKeyRouteSendsAMessagesPhase(t *testing.T) {
 		}
 		return out
 	}
-	body, err := r.body(RouteKey)
+	body, err := r.bodyWith(RouteKey, false)
 	if err != nil {
 		t.Fatal(err)
 	}

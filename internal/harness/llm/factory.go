@@ -37,6 +37,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/netip"
+	"net/url"
 	"slices"
 	"strings"
 
@@ -44,6 +46,7 @@ import (
 	"charm.land/fantasy/providers/openai"
 	"charm.land/fantasy/providers/openaicompat"
 	"github.com/charliek/craze/internal/harness/llm/messagesapi"
+	"github.com/charliek/craze/internal/harness/llm/responsesapi"
 	"github.com/charliek/craze/internal/harness/modeltable"
 	"github.com/charmbracelet/openai-go/option"
 )
@@ -69,11 +72,15 @@ var ErrAPIKeyTooShort = errors.New("llm: API key too short to be real")
 // Option configures New.
 type Option func(*options)
 
+var openAISticky = responsesapi.NewStickyRegistry()
+
 type options struct {
-	httpClient    *http.Client
-	auth          Auth
-	apiBase       func() (string, error)
-	anthropicBase func() (string, error)
+	httpClient      *http.Client
+	auth            Auth
+	apiBase         func() (string, error)
+	anthropicBase   func() (string, error)
+	openAITransport string
+	sticky          *responsesapi.StickyRegistry
 }
 
 // WithHTTPClient sends the model's requests through c instead of the SDK's
@@ -82,16 +89,40 @@ func WithHTTPClient(c *http.Client) Option {
 	return func(o *options) { o.httpClient = c }
 }
 
-// WithSignIn is the sign-in a model on the ChatGPT plan's driver is funded by
-// (plan 033 §3.12, P31): auth, the process's token source — the harness
-// knows it only as an Auth, handed in through harness.Options — and apiBase,
-// which answers the API's base URL when the model is built: OpenAI's own, or
-// a test's loopback server (chatgptauth.APIBase, whose error — a test
-// override that is not a loopback URL — fails the build, so the bearer can
-// never fall back to another host). A nil apiBase is OpenAI's. Every model
-// New builds also keeps auth's token values out of its errors, whatever its
-// driver: a provider error can echo a request, and a request can hold a tool
-// result that printed a token (scrubber, A21b).
+// WithOpenAITransport selects the transport for eligible OpenAI Responses models.
+func WithOpenAITransport(mode string) Option {
+	return func(o *options) { o.openAITransport = strings.ToLower(strings.TrimSpace(mode)) }
+}
+
+// WithStickyRegistry supplies a registry for automatic WebSocket fallback.
+// New uses the process-wide registry by default.
+func WithStickyRegistry(sticky *responsesapi.StickyRegistry) Option {
+	return func(o *options) { o.sticky = sticky }
+}
+
+func (o options) transport(eligible bool, baseURL string) responsesapi.TransportMode {
+	if eligible {
+		switch o.openAITransport {
+		case "":
+			// Keep test endpoints and injected HTTP clients on SSE by default.
+			if o.httpClient == nil {
+				u, err := url.Parse(baseURL)
+				if err == nil && strings.EqualFold(u.Hostname(), "api.openai.com") {
+					return responsesapi.TransportAuto
+				}
+			}
+		case "auto":
+			return responsesapi.TransportAuto
+		case "websocket":
+			return responsesapi.TransportWebSocket
+		}
+	}
+	return responsesapi.TransportSSE
+}
+
+// WithSignIn supplies the ChatGPT plan's token source and API base.
+// A nil apiBase uses OpenAI's own endpoint. The model's scrubber keeps auth's
+// token values out of its errors, regardless of driver.
 func WithSignIn(auth Auth, apiBase func() (string, error)) Option {
 	return func(o *options) { o.auth, o.apiBase = auth, apiBase }
 }
@@ -129,6 +160,14 @@ func New(r modeltable.Resolved, opts ...Option) (fantasy.LanguageModel, error) {
 	var o options
 	for _, opt := range opts {
 		opt(&o)
+	}
+	switch o.openAITransport {
+	case "", "auto", "websocket", "sse":
+	default:
+		return nil, fmt.Errorf("llm: invalid OpenAI transport %q (expected auto, websocket, or sse)", o.openAITransport)
+	}
+	if o.sticky == nil {
+		o.sticky = openAISticky
 	}
 	var baseURL string
 	switch r.Driver {
@@ -226,7 +265,7 @@ func newSignedIn(r modeltable.Resolved, o options) (fantasy.LanguageModel, error
 	if err != nil {
 		return nil, err
 	}
-	lm, err := newResponsesModel(r, o.auth, base, o.httpClient)
+	lm, err := newResponsesModel(r, base, o)
 	if err != nil {
 		return nil, err
 	}
@@ -278,11 +317,35 @@ func newKeyResponses(r modeltable.Resolved, o options) (fantasy.LanguageModel, e
 	if base == "" {
 		return nil, fmt.Errorf("llm: provider %q (model %q): driver %q needs a base URL", r.ProviderID, r.Alias, r.Driver)
 	}
-	lm, err := newKeyResponsesModel(r, key, base, o.httpClient)
+	lm, err := newKeyResponsesModel(r, key, base, o)
 	if err != nil {
 		return nil, err
 	}
 	return wrap(lm, newScrubber(key, o.auth)), nil
+}
+
+// isOpenAIEndpoint identifies OpenAI's Responses endpoints, including
+// loopback fixtures for the OpenAI key provider.
+func isOpenAIEndpoint(route responsesapi.Route, providerID, baseURL string) bool {
+	return route == responsesapi.RouteChatGPT || (route == responsesapi.RouteKey && IsOpenAIKeyEndpoint(providerID, baseURL))
+}
+
+// IsOpenAIKeyEndpoint reports whether a key-route provider uses OpenAI's
+// Responses endpoint or an eligible loopback fixture.
+func IsOpenAIKeyEndpoint(providerID, baseURL string) bool {
+	if providerID != modeltable.OpenAIProvider {
+		return false
+	}
+	u, err := url.Parse(strings.TrimSpace(baseURL))
+	if err != nil {
+		return false
+	}
+	host := u.Hostname()
+	if strings.EqualFold(host, "api.openai.com") {
+		return true
+	}
+	ip, err := netip.ParseAddr(host)
+	return err == nil && ip.Zone() == "" && !ip.Is4In6() && ip.IsLoopback()
 }
 
 // openAIEfforts are the reasoning efforts Fantasy's OpenAI-compatible client

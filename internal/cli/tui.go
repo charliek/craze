@@ -351,6 +351,7 @@ func sessionOptions(f *tuiFlags, ws, mode string, stderr, diag io.Writer, env []
 		Provider:        &p,
 		Compat:          compatClaude(diag),
 		ProviderRetries: providerRetries(diag),
+		OpenAITransport: openAITransport(diag),
 		WebSearch:       tui.ConfigWebSearch(),
 		// The index's title and pin are seeded before Start so the composer
 		// rule shows the stored title through the replay and a /rename

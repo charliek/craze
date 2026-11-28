@@ -576,6 +576,56 @@ func TestConfigProviderRetriesTable(t *testing.T) {
 	}
 }
 
+func TestConfigOpenAITransport(t *testing.T) {
+	const invalid = "config.toml openai_transport must be auto, websocket, or sse"
+	for _, tc := range []struct {
+		name, body, mode, why string
+	}{
+		{"absent", "theme = \"dark\"\n", "", ""},
+		{"auto", "openai_transport = \"auto\"\n", "auto", ""},
+		{"websocket", "openai_transport = \"websocket\"\n", "websocket", ""},
+		{"sse", "openai_transport = \"sse\"\n", "sse", ""},
+		{"mixed case and spaces", "openai_transport = \"  WebSocket  \"\n", "websocket", ""},
+		{"unknown string", "openai_transport = \"tcp\"\n", "", invalid},
+		{"empty string", "openai_transport = \"\"\n", "", invalid},
+		{"non-string", "openai_transport = true\n", "", invalid},
+		{"malformed TOML", "openai_transport = [\n", "", "config.toml could not be parsed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			writeConfigFile(t, tc.body)
+			if mode, why := ConfigOpenAITransport(); mode != tc.mode || why != tc.why {
+				t.Fatalf("ConfigOpenAITransport() = %q, %q; want %q, %q", mode, why, tc.mode, tc.why)
+			}
+		})
+	}
+	t.Run("unreadable", func(t *testing.T) {
+		t.Setenv("CRAZE_HOME", t.TempDir())
+		if err := os.Mkdir(configPath(), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if mode, why := ConfigOpenAITransport(); mode != "" || why != "config.toml could not be read" {
+			t.Fatalf("ConfigOpenAITransport() = %q, %q", mode, why)
+		}
+	})
+}
+
+func TestConfigOpenAITransportSurvivesPreferenceWrites(t *testing.T) {
+	const value = "  WebSocket  "
+	writeConfigFile(t, "openai_transport = \""+value+"\"\n")
+	for _, save := range []func() error{func() error { return SaveTheme("gruvbox") }, func() error { return SaveProvider("codex") }} {
+		if err := save(); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := readConfig()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := cfg["openai_transport"]; got != value {
+			t.Fatalf("openai_transport = %q after saving a preference, want %q", got, value)
+		}
+	}
+}
+
 func TestSavePreferencesPreservesRouting(t *testing.T) {
 	path := writeConfigFile(t, `[routing]
 allow_paid_fallback = true

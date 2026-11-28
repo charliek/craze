@@ -250,6 +250,10 @@ type Options struct {
 	// model is built (llm.WithSignIn): chatgptauth.APIBase in production —
 	// OpenAI's own, or a test's loopback override — and nil for OpenAI's.
 	AuthAPIBase func() (string, error)
+
+	// OpenAITransport selects the transport for eligible Responses models.
+	OpenAITransport string
+
 	// AnthropicAPIBase answers the API base Anthropic's driver sends to, when
 	// a model is built (llm.WithAnthropicAPIBase, plan 044 §3.3, P21): in
 	// production the adapter's reading of messagesapi.BaseURL — Anthropic's
@@ -639,7 +643,7 @@ type logged struct {
 // With Options.Resume set it reopens a stored session instead (resume.go,
 // plan 028 §3.3). That Open holds the transcript's file and its lock from the
 // store's Open on, and releases both on every error after it.
-func Open(opts Options) (*Session, error) {
+func Open(opts Options) (_ *Session, err error) {
 	if opts.Table == nil {
 		return nil, errors.New("harness: no model table")
 	}
@@ -675,8 +679,9 @@ func Open(opts Options) (*Session, error) {
 		// it builds on the parent's sign-in and at the parent's Anthropic
 		// base too.
 		auth, base, anthropicBase := opts.Auth, opts.AuthAPIBase, opts.AnthropicAPIBase
+		transport := opts.OpenAITransport
 		s.newModel = func(r modeltable.Resolved) (fantasy.LanguageModel, error) {
-			o := []llm.Option{llm.WithAnthropicAPIBase(anthropicBase)}
+			o := []llm.Option{llm.WithAnthropicAPIBase(anthropicBase), llm.WithOpenAITransport(transport)}
 			if auth != nil {
 				o = append(o, llm.WithSignIn(auth, base))
 			}
@@ -712,6 +717,7 @@ func Open(opts Options) (*Session, error) {
 		s.base = childBase{
 			home: opts.Home, workspace: opts.Workspace, version: opts.Version, now: opts.Now,
 			prompt: opts.Prompt.clone(), snapshot: opts.Snapshot, seams: opts.tools, web: opts.Web,
+			openAITransport: opts.OpenAITransport,
 		}
 	}
 	if opts.SessionID != "" && (opts.Resume != "" || child != nil) {
@@ -753,6 +759,12 @@ func Open(opts Options) (*Session, error) {
 	if err != nil {
 		return nil, err
 	}
+	builtLM := m.lm
+	defer func() {
+		if err != nil {
+			_ = llm.CloseModel(builtLM)
+		}
+	}()
 	effort := opts.Effort
 	if effort == "" {
 		effort = m.r.DefaultEffort
@@ -870,6 +882,7 @@ func Open(opts Options) (*Session, error) {
 			return nil, fmt.Errorf("harness: %w", s.tools.redactErr(err))
 		}
 	}
+	llm.PreDial(m.lm, st.ID())
 	return s, nil
 }
 
@@ -986,7 +999,9 @@ func (s *Session) setModel(alias string, landing func(current string, r modeltab
 		if err != nil {
 			return err
 		}
+		builtLM := m.lm
 		if err := s.tools.check(m.r); err != nil {
+			_ = llm.CloseModel(builtLM)
 			return err
 		}
 		// Outside the lock, like the build: it reads the environment. It only
@@ -994,6 +1009,7 @@ func (s *Session) setModel(alias string, landing func(current string, r modeltab
 		// already running keeps the one it has redacted its steps with, and a
 		// switch that fails below leaves nothing installed either.
 		if err := s.tools.resolve(table, s.getenv); err != nil {
+			_ = llm.CloseModel(builtLM)
 			return err
 		}
 		if seam := s.setModelBuilt; seam != nil {
@@ -1002,10 +1018,12 @@ func (s *Session) setModel(alias string, landing func(current string, r modeltab
 		s.mu.Lock()
 		if s.closed {
 			s.mu.Unlock()
+			_ = llm.CloseModel(builtLM)
 			return ErrClosed
 		}
 		if s.table != table {
 			s.mu.Unlock()
+			_ = llm.CloseModel(builtLM)
 			if attempt == 0 {
 				continue
 			}
@@ -1017,10 +1035,16 @@ func (s *Session) setModel(alias string, landing func(current string, r modeltab
 		}
 		if m, err = withEffort(m, effort); err != nil {
 			s.mu.Unlock()
+			_ = llm.CloseModel(builtLM)
 			return err
 		}
+		oldLM := s.cur.lm
 		s.cur = m
 		s.mu.Unlock()
+		_ = llm.CloseModel(oldLM)
+		if !s.child {
+			llm.PreDial(m.lm, s.store.ID())
+		}
 		return nil
 	}
 }
@@ -1218,6 +1242,16 @@ func (s *Session) Current() (model, effort string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.cur.r.Alias, s.cur.effort
+}
+
+// OpenAIWebSocketUnavailable reports when an explicit WebSocket setting
+// leaves the current key-route Responses model on HTTP SSE.
+func (s *Session) OpenAIWebSocketUnavailable() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r := s.cur.r
+	return s.base.openAITransport == "websocket" &&
+		r.Driver == modeltable.DriverOpenAIResponses && !llm.IsOpenAIKeyEndpoint(r.ProviderID, r.BaseURL)
 }
 
 // ID is the session id: a UUID, in the transcript's header and file name.
@@ -1508,7 +1542,7 @@ func (s *Session) Close() error {
 			seam()
 		}
 		s.sideCalls.Wait()
-		if err := s.store.Close(); err != nil {
+		if err := errors.Join(llm.CloseModel(s.cur.lm), s.store.Close()); err != nil {
 			s.closeErr = fmt.Errorf("harness: %w", s.tools.redactErr(err))
 		}
 	})

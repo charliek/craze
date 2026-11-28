@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"charm.land/fantasy"
+	"github.com/charliek/craze/internal/harness/llm"
 	"github.com/charliek/craze/internal/harness/modeltable"
 	"github.com/charliek/craze/internal/harness/redact"
 	"github.com/charliek/craze/internal/harness/store"
@@ -124,6 +125,12 @@ func (s *Session) openResumed(opts Options) (_ *Session, err error) {
 	if err != nil {
 		return nil, err
 	}
+	builtLM := m.lm
+	defer func() {
+		if err != nil {
+			_ = llm.CloseModel(builtLM)
+		}
+	}()
 	var effort string
 	switch {
 	case opts.Effort != "":
@@ -200,6 +207,7 @@ func (s *Session) openResumed(opts Options) (_ *Session, err error) {
 	// file under the home each one's output went to, as its marker line
 	// named it (C11r3, jobs_resume.go).
 	s.subs.restoreJobs(opts.Home, was.jobs)
+	llm.PreDial(m.lm, st.ID())
 	return s, nil
 }
 

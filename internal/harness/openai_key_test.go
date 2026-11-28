@@ -2,6 +2,7 @@ package harness
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -78,12 +79,91 @@ func assistantPhases(t *testing.T, body []byte) []any {
 	return out
 }
 
+// rsTextItem is the expected wire shape of a one-part message.
+func rsTextItem(role, kind, text string) map[string]any {
+	return map[string]any{"type": "message", "role": role,
+		"content": []any{map[string]any{"type": kind, "text": text}}}
+}
+
+// openAIDeveloperInput verifies the prompt prefix and returns the remaining input.
+func openAIDeveloperInput(t *testing.T, body []byte, system, digest string) []map[string]any {
+	t.Helper()
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(body, &fields); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := fields["instructions"]; exists {
+		t.Fatal("OpenAI request also sent top-level instructions")
+	}
+	var input []map[string]any
+	if err := json.Unmarshal(fields["input"], &input); err != nil {
+		t.Fatal(err)
+	}
+	if len(input) == 0 {
+		t.Fatal("OpenAI request sent no input")
+	}
+	equal(t, "developer prefix", input[0], rsTextItem("developer", "input_text", system))
+	sent := input[0]["content"].([]any)[0].(map[string]any)["text"].(string)
+	equal(t, "digest of system prompt sent to OpenAI", promptDigest(sent), digest)
+	for _, item := range input[1:] {
+		if item["role"] == "developer" || item["role"] == "system" {
+			t.Fatalf("unexpected prompt item after the developer prefix: %v", item)
+		}
+	}
+	return input[1:]
+}
+
+func TestOpenAISummarizersKeepDeveloperPrefix(t *testing.T) {
+	api := newRsAPI(t,
+		rsReply(rsReasoning("rs_1", "sealed-1"), rsAnswer("msg_1", "hello back", "final_answer")),
+		func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprint(w, `{"error":{"code":"context_length_exceeded","message":"context length exceeded"}}`)
+		},
+		rsReply(rsAnswer("msg_2", longSummary("1. Request and intent\nSaid hello."), "final_answer")),
+	)
+	f := newFixture(t, api.base())
+	onShippedOpenAI(f, api.base())
+	s := f.open(realOptions(f))
+	run(t, s, "hello")
+	digest := transcript(t, s).Header.SystemPromptSHA256
+	if _, err := s.Compact(t.Context(), "", "/compact", nil); err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+
+	reqs := api.requests()
+	if len(reqs) != 3 {
+		t.Fatalf("got %d requests, want turn, aligned summary, and text summary", len(reqs))
+	}
+	turn := openAIDeveloperInput(t, reqs[0], s.system, digest)
+	equal(t, "turn input", turn, []map[string]any{rsTextItem("user", "input_text", "hello")})
+	aligned := openAIDeveloperInput(t, reqs[1], s.system, digest)
+	answer := rsTextItem("assistant", "output_text", "hello back")
+	answer["phase"] = "final_answer"
+	equal(t, "aligned summarizer input", aligned, []map[string]any{
+		turn[0], rsReasoning("rs_1", "sealed-1"), answer,
+		rsTextItem("user", "input_text", s.compactionPromptText("", s.redactor())),
+	})
+	text := openAIDeveloperInput(t, reqs[2], s.system, digest)
+	equal(t, "text summarizer input shape", rsShape(text), []string{"message/user"})
+	content := fmt.Sprint(text[0]["content"])
+	for _, want := range []string{"[User]: hello", "[Assistant]: hello back", compactionPrompt} {
+		if !strings.Contains(content, want) {
+			t.Errorf("text summarizer input is missing %q", want)
+		}
+	}
+	equal(t, "prompt digest after compaction", s.PromptSHA256(), digest)
+}
+
 // TestOpenAIMessagePhaseSurvivesAReopen: a turn on the catalog's own model on
 // the OpenAI key's provider — a commentary message beside a tool call, then
 // the final answer — replays the commentary's phase on its next step; the
 // transcript keeps both phases in the text parts' metadata; and a reopened
-// session's first request replays both, as the live session would. The
-// controls: the same turns on another provider on the driver (Meta's shape,
+// session's first request replays both, as the live session would. On the
+// catalog model the developer prefix, digest and replayed history are also
+// checked across the reopen. The controls run the same turns on another
+// provider on the driver (Meta's shape,
 // its stream carrying the phases), or on a model of the user's own on a
 // provider named openai — alone, or over the catalog's overridden one (plan
 // 050 review) — store no phase metadata at all — the transcript is what it
@@ -116,6 +196,7 @@ func TestOpenAIMessagePhaseSurvivesAReopen(t *testing.T) {
 				t.Fatal(err)
 			}
 			run(t, s, "what is in a.txt?")
+			digest := transcript(t, s).Header.SystemPromptSHA256
 			if err := s.Close(); err != nil {
 				t.Fatal(err)
 			}
@@ -146,6 +227,18 @@ func TestOpenAIMessagePhaseSurvivesAReopen(t *testing.T) {
 			}
 			if got := assistantPhases(t, reqs[2]); !slices.Equal(got, want[1]) {
 				t.Fatalf("the reopened session's request replays phases %v, want %v", got, want[1])
+			}
+			if tc.sends {
+				equal(t, "resumed prompt digest", r.PromptSHA256(), digest)
+				step := openAIDeveloperInput(t, reqs[1], s.system, digest)
+				replay := openAIDeveloperInput(t, reqs[2], s.system, digest)
+				equal(t, "step history shape", rsShape(step), []string{
+					"message/user", "reasoning/rs_1", "message/assistant", "function_call/call_01", "function_call_output/call_01",
+				})
+				equal(t, "encrypted reasoning", step[1], rsReasoning("rs_1", "sealed-1"))
+				final := rsTextItem("assistant", "output_text", "It says alpha.")
+				final["phase"] = "final_answer"
+				equal(t, "history replayed after reopening", replay, append(step, final, rsTextItem("user", "input_text", "and now?")))
 			}
 		})
 	}
