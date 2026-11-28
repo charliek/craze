@@ -1047,7 +1047,8 @@ older binary should not write it.
   fireworks/deepseek-v4p1-flash-1017`. Signing in again fixes it; so do `--model`, a
   `default_model` pin, a model you picked with `/model` (the model memory),
   or a `provider_order` that lists that provider before `chatgpt`. A Z.AI key,
-  before the plan in the order, still starts on `glm-5.3`, and a model on a
+  before the plan in the order, still starts on Z.AI's start model (now
+  `glm-5.4`), and a model on a
   provider of your own none of whose models has a price still starts. A
   registration a sign-out left behind holds nothing back. A sign-in your
   `provider_order` leaves out holds back no other maker's models, but still

@@ -758,10 +758,13 @@ cache_read = 0.25
 # on the plan from 2026-11-23 (the endpoint's GET /models), not yet on Z.AI's
 # own API, OpenRouter or Fireworks. Window and output limit are Z.AI's docs.
 # Unlike GLM 5.3 it takes images. The docs name no effort levels: the endpoint
-# takes all seven reasoning_effort values (and an unknown one, without the
-# 400 GLM 5.3 gives), and reasoning grows from low to max, so it keeps 5.3's
-# documented three and 5.3's default. Seen live on 2026-11-27: a tool call
-# and an image described, on the endpoint and through craze.
+# takes all seven reasoning_effort values, and an unknown one without the 400
+# GLM 5.3 gives. A sweep on 2026-11-27 (two prompts, three samples each) found
+# three tiers, as on GLM 5.3: none, minimal and low reason least, medium more,
+# and high, xhigh, max, no value and an unknown value most and alike. So it
+# keeps 5.3's documented three (medium is undocumented) and max, the tier the
+# endpoint defaults to. Seen live on 2026-11-27: a tool call and an image
+# described, on the endpoint and through craze.
 [models."glm-5.4"]
 provider = "zai-coding-plan"
 wire_model = "glm-5.4"
